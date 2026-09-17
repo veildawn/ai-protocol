@@ -187,13 +187,18 @@ func anthropicUsageToOpenAI(v any) map[string]any {
 	}
 	in, _ := jsonx.Int(m["input_tokens"])
 	out, _ := jsonx.Int(m["output_tokens"])
+	cacheRead, _ := jsonx.Int(m["cache_read_input_tokens"])
+	cacheWrite, _ := jsonx.Int(m["cache_creation_input_tokens"])
+	// OpenAI prompt_tokens is inclusive of cache read/write; Anthropic
+	// input_tokens is the uncached remainder.
+	prompt := in + cacheRead + cacheWrite
 	u := map[string]any{
-		"prompt_tokens":     in,
+		"prompt_tokens":     prompt,
 		"completion_tokens": out,
-		"total_tokens":      in + out,
+		"total_tokens":      prompt + out,
 	}
-	if c, ok := jsonx.Int(m["cache_read_input_tokens"]); ok && c > 0 {
-		u["prompt_tokens_details"] = map[string]any{"cached_tokens": c}
+	if cacheRead > 0 {
+		u["prompt_tokens_details"] = map[string]any{"cached_tokens": cacheRead}
 	}
 	return u
 }

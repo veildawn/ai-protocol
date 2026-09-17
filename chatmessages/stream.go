@@ -250,6 +250,7 @@ type msgToChatState struct {
 	emitted   bool
 	done      bool
 	blockType string
+	usage     map[string]any
 }
 
 func (s *msgToChatState) feedAnthropic(event string, obj map[string]any) []stream.Event {
@@ -265,6 +266,9 @@ func (s *msgToChatState) feedAnthropic(event string, obj map[string]any) []strea
 			}
 			if m := jsonx.GetString(msg, "model"); m != "" {
 				s.model = m
+			}
+			if u, ok := jsonx.AsMap(msg["usage"]); ok {
+				s.usage = copyUsage(u)
 			}
 		}
 		return []stream.Event{s.chunk(map[string]any{"role": "assistant"}, "")}
@@ -314,10 +318,12 @@ func (s *msgToChatState) feedAnthropic(event string, obj map[string]any) []strea
 		if d != nil {
 			fr = stopReasonToFinish(jsonx.GetString(d, "stop_reason"))
 		}
-		usage := obj["usage"]
+		if um, ok := jsonx.AsMap(obj["usage"]); ok {
+			s.usage = mergeUsage(s.usage, um)
+		}
 		chunk := s.fullChunk(map[string]any{}, fr)
-		if um, ok := jsonx.AsMap(usage); ok {
-			chunk["usage"] = anthropicUsageToOpenAI(um)
+		if s.usage != nil {
+			chunk["usage"] = anthropicUsageToOpenAI(s.usage)
 		}
 		return []stream.Event{{Data: mustJSON(chunk)}}
 	case "message_stop":
@@ -371,3 +377,22 @@ func mustJSON(v any) string {
 }
 
 func itoa(i int) string { return strconv.Itoa(i) }
+
+func copyUsage(in map[string]any) map[string]any {
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func mergeUsage(base, delta map[string]any) map[string]any {
+	if base == nil {
+		return copyUsage(delta)
+	}
+	out := copyUsage(base)
+	for k, v := range delta {
+		out[k] = v
+	}
+	return out
+}
