@@ -1,0 +1,6 @@
+This product includes protocol mapping derived from LiteLLM
+https://github.com/BerriAI/litellm
+Copyright (c) 2023 Berri AI
+Licensed under the MIT License.
+
+Spec pin: LiteLLM v1.100.1
