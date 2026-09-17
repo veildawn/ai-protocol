@@ -152,3 +152,72 @@ func TestPipeMessagesToChatMergesCacheUsage(t *testing.T) {
 		t.Fatalf("completion_tokens=%v want 4", usage["completion_tokens"])
 	}
 }
+
+func TestPipeStreamWithReportsSourceTerminal(t *testing.T) {
+	src := strings.Join([]string{
+		`data: {"id":"c1","choices":[{"delta":{"content":"hi"}}]}`,
+		``,
+		`data: {"id":"c1","choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	var dst bytes.Buffer
+	result, err := PipeStreamWith(Chat, Responses, &dst, strings.NewReader(src), StreamOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Terminal || result.Truncated || result.InBandErr != nil {
+		t.Fatalf("result=%+v", result)
+	}
+}
+
+func TestPipeStreamWithReportsTruncation(t *testing.T) {
+	src := strings.Join([]string{
+		`data: {"id":"c1","choices":[{"delta":{"content":"hi"}}]}`,
+		``,
+		``,
+	}, "\n")
+	var dst bytes.Buffer
+	result, err := PipeStreamWith(Chat, Responses, &dst, strings.NewReader(src), StreamOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Terminal || !result.Truncated || result.InBandErr != nil {
+		t.Fatalf("result=%+v", result)
+	}
+}
+
+func TestPipeStreamWithReportsInBandError(t *testing.T) {
+	src := "data: {\"error\":{\"message\":\"boom\"}}\n\n"
+	var dst bytes.Buffer
+	result, err := PipeStreamWith(Chat, Responses, &dst, strings.NewReader(src), StreamOpts{})
+	if err != nil {
+		t.Fatalf("PipeStreamWith error should be metadata: %v", err)
+	}
+	if !result.Terminal || result.Truncated {
+		t.Fatalf("result=%+v", result)
+	}
+	if result.InBandErr == nil || result.InBandErr.Error() != "boom" {
+		t.Fatalf("InBandErr=%v", result.InBandErr)
+	}
+}
+
+func TestPipeStreamWithSameDialectReportsTerminal(t *testing.T) {
+	src := strings.Join([]string{
+		`event: message_stop`,
+		`data: {"type":"message_stop"}`,
+		``,
+	}, "\n")
+	var dst bytes.Buffer
+	result, err := PipeStreamWith(Messages, "anthropic", &dst, strings.NewReader(src), StreamOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Terminal || result.Truncated || result.InBandErr != nil {
+		t.Fatalf("result=%+v", result)
+	}
+	if dst.String() != src {
+		t.Fatalf("same dialect changed bytes: %q", dst.String())
+	}
+}

@@ -3,6 +3,7 @@ package stream
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -14,6 +15,29 @@ const maxEventBytes = 8 << 20
 type Event struct {
 	Event string
 	Data  string
+}
+
+// Dialect infers the public source dialect from an event so generic stream
+// settlement code can remain in the root package.
+func (e Event) Dialect() Dialect {
+	if IsDone(e.Data) {
+		return Chat
+	}
+	var obj struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal([]byte(e.Data), &obj) != nil {
+		return ""
+	}
+	switch obj.Type {
+	case "message_start", "message_delta", "message_stop",
+		"content_block_start", "content_block_delta", "content_block_stop":
+		return Messages
+	case "response.created", "response.completed", "response.incomplete", "response.failed",
+		"response.output_text.delta", "response.output_item.added":
+		return Responses
+	}
+	return ""
 }
 
 func (e Event) Encode() string {
