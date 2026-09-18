@@ -2,8 +2,9 @@ package protocol
 
 import "fmt"
 
-// UnsupportedParamError is raised when an OpenAI-style parameter cannot be
-// represented on the target dialect. Matches LiteLLM default drop_params=false.
+// UnsupportedParamError is raised when a Chat-style parameter cannot be
+// represented on the target dialect and the caller has not opted into omission
+// (ConvertOptions.DropParams).
 type UnsupportedParamError struct {
 	Param    string
 	From, To Dialect

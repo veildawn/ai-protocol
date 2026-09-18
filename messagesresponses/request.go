@@ -81,7 +81,8 @@ func MessagesToResponses(body map[string]any) (map[string]any, error) {
 			out["prompt_cache_key"] = trunc
 		}
 	}
-	// stop_sequences, top_k, speed dropped silently (LiteLLM docs + 1.100.1 source)
+	// stop_sequences, top_k and speed have no Messages counterpart and are
+	// dropped; the omission is reported through the loss API.
 	return out, nil
 }
 

@@ -226,7 +226,7 @@ var vendorVocabulary = []string{
 	"openai.com", "anthropic.com", "googleapis.com",
 	"gemini", "claude", "gpt", "qwen", "deepseek", "grok", "mistral",
 	"cohere", "ollama", "llama", "bedrock", "vertex", "azure",
-	"moonshot", "zhipu", "kimi",
+	"moonshot", "zhipu", "kimi", "litellm",
 }
 
 func TestCodecCarriesNoVendorKnowledge(t *testing.T) {

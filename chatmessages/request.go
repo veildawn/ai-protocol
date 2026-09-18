@@ -13,7 +13,8 @@ import (
 
 const openaiMaxToolName = 64
 
-// OpenAI chat params LiteLLM treats as "openai params" (raise if unsupported).
+// The Chat dialect's request vocabulary. A parameter in this set that the
+// target dialect cannot represent is refused, never silently dropped.
 var openaiChatParams = map[string]struct{}{
 	"messages": {}, "model": {}, "frequency_penalty": {}, "logit_bias": {}, "logprobs": {},
 	"top_logprobs": {}, "max_tokens": {}, "max_completion_tokens": {}, "n": {},
@@ -26,7 +27,7 @@ var openaiChatParams = map[string]struct{}{
 	"cache_control": {}, "audio": {},
 }
 
-// AnthropicConfig.get_supported_openai_params (LiteLLM 1.100.1) plus always-kept keys.
+// Chat parameters a Messages target can represent, plus always-kept keys.
 var chatToMessagesSupported = map[string]struct{}{
 	"model": {}, "messages": {},
 	"stream": {}, "stop": {}, "temperature": {}, "top_p": {},
@@ -101,7 +102,7 @@ func ChatToMessages(body map[string]any, dropParams bool) (map[string]any, error
 	}
 	copyIf(body, out, "context_management")
 	copyIf(body, out, "speed")
-	// Remaining non-OpenAI params pass through (LiteLLM _copy_untranslated).
+	// Parameters outside the Chat vocabulary pass through untranslated.
 	for k, v := range body {
 		if _, isOA := openaiChatParams[k]; isOA {
 			continue

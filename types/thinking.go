@@ -1,7 +1,8 @@
 package types
 
-// Thinking budget thresholds from LiteLLM v1.100.1 constants.py
-// (DEFAULT_REASONING_EFFORT_*_THINKING_BUDGET).
+// Thinking-budget thresholds for bucketing a Messages thinking budget into
+// effort labels. These values are the codec's own public contract: they decide
+// what a converted request asks for, so they change only deliberately.
 const (
 	BudgetMinimal = 128
 	BudgetLow     = 1024
@@ -12,8 +13,8 @@ const (
 	MinThinking   = 1024
 )
 
-// EffortFromBudget buckets Anthropic thinking.budget_tokens into an OpenAI-style
-// reasoning_effort label. LiteLLM: reasoning_effort_from_thinking_budget.
+// EffortFromBudget buckets a Messages thinking.budget_tokens into a
+// Chat-style reasoning_effort label.
 func EffortFromBudget(budget int) string {
 	if budget >= BudgetHigh {
 		return "high"
