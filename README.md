@@ -1,12 +1,59 @@
 # ai-protocol
 
-Go SDK that converts JSON bodies and SSE streams between three public LLM dialects:
+A **public dialect codec**: it converts JSON bodies and SSE streams between the
+three public LLM dialects, and it does nothing else.
 
 - `chat` — OpenAI Chat Completions (`/v1/chat/completions`)
 - `messages` — Anthropic Messages (`/v1/messages`)
 - `responses` — OpenAI Responses (`/v1/responses`)
 
-Mappings follow [LiteLLM](https://github.com/BerriAI/litellm) **v1.100.1**. The library does not send HTTP and does not implement provider-specific dialects.
+Mappings follow [LiteLLM](https://github.com/BerriAI/litellm) **v1.100.1** (see
+[NOTICE](NOTICE)).
+
+## The contract
+
+This library is a leaf. Everything a host needs to know about the boundary is in
+this list, and `boundary_test.go` fails the build when a change breaks one of
+them.
+
+**What it is**
+
+- Exactly three public dialects, request/response/SSE conversion between any
+  pair of them, as pure functions.
+- Explicit error semantics: `UnsupportedParamError` for a parameter the target
+  dialect cannot carry, `ConversionError` for a body it cannot read, and
+  `StreamResult` (`Terminal`/`Truncated`/`InBandErr`) for how a stream ended.
+- Offline and standard-library only. No module dependencies, no I/O, no clock.
+
+**What it is not**
+
+- **No HTTP.** It never opens a connection and never sees a header.
+- **No provider routing.** It does not choose an upstream, and it knows nothing
+  about accounts, quota, billing or policy.
+- **No vendor knowledge.** No brand names, no vendor hosts, no vendor-specific
+  parameter repair. Those live in a provider plugin, which is also where the
+  private wire format lives.
+
+**Where it sits**
+
+```
+client public dialect        openai / anthropic / responses, as the client speaks it
+        ↓
+ai-protocol                  public ↔ public conversion, pure functions
+        ↓
+public provider dialect      the arm the provider plugin declares it exposes
+        ↓
+provider plugin              public → vendor wire, vendor quirks, credentials
+        ↓
+vendor wire
+```
+
+A host supplies **policy** through the seams on the options types — `Flush` for
+write-through, `OnEvent` for rewriting decoded stream events — and the policy
+itself stays in the host. Nothing in this library has an opinion about what a
+hook does.
+
+## Usage
 
 ```go
 import "github.com/veildawn/ai-protocol"
@@ -17,3 +64,29 @@ n, err := protocol.PipeStream(protocol.Messages, protocol.Chat, dst, src, protoc
 ```
 
 Same-dialect calls return the original bytes unchanged.
+
+Streaming takes an optional per-event hook, applied to every target-dialect
+event just before it is written — including the terminal frames the converter
+synthesizes. It is how a host applies a rewriting this library does not know
+about without re-parsing serialized SSE:
+
+```go
+result, err := protocol.PipeStreamWith(protocol.Chat, protocol.Responses, dst, src, protocol.StreamOpts{
+    Flush: flush,
+    OnEvent: func(ev stream.Event) (stream.Event, error) {
+        // rewrite ev.Event / ev.Data, or return ev untouched
+        return ev, nil
+    },
+})
+```
+
+A nil hook is the identity: the bytes written are exactly what the converter
+produces on its own. Hooks are **not** called on the same-dialect path, which is
+a raw copy with nothing decoded to hand a hook.
+
+## Changing the boundary
+
+Adding public API, a dependency, a dialect or an import is a boundary decision,
+not an implementation detail. `boundary_test.go` will fail and point here: either
+update the allowlist in that file *and* this contract, or move the change to the
+consumer where the policy belongs.
