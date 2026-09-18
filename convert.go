@@ -5,10 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strings"
 
 	"github.com/veildawn/ai-protocol/chatmessages"
 	"github.com/veildawn/ai-protocol/chatresponses"
+	"github.com/veildawn/ai-protocol/internal/cerr"
 	"github.com/veildawn/ai-protocol/internal/jsonx"
 	"github.com/veildawn/ai-protocol/messagesresponses"
 	"github.com/veildawn/ai-protocol/stream"
@@ -54,7 +54,10 @@ type ConvertOptions struct {
 }
 
 // ConvertRequest maps a request body from dialect `from` to dialect `to`.
-// Same-dialect calls return the original bytes.
+// Same-dialect calls return the original bytes. Folds INTO Messages need the
+// target dialect's required max_tokens: supply ConvertOptions.MaxTokensFallback
+// through ConvertRequestWith, or the conversion fails with
+// MissingRequiredFieldError.
 func ConvertRequest(from, to Dialect, body []byte) (Converted, error) {
 	return ConvertRequestWith(from, to, body, ConvertOptions{})
 }
@@ -99,9 +102,9 @@ func convertRequest(from, to Dialect, body []byte, opts ConvertOptions) (Convert
 		return Converted{}, fmt.Errorf("unsupported conversion %s -> %s", src, dst)
 	}
 	if err != nil {
-		if strings.HasPrefix(err.Error(), "unsupported openai param ") {
-			p := strings.Trim(strings.TrimPrefix(err.Error(), "unsupported openai param "), `"`)
-			return Converted{}, UnsupportedParamError{Param: p, From: src, To: dst}
+		var unsup cerr.UnsupportedParam
+		if errors.As(err, &unsup) {
+			return Converted{}, UnsupportedParamError{Param: unsup.Param, From: src, To: dst}
 		}
 		return Converted{}, ConversionError{Op: "request", Err: err}
 	}

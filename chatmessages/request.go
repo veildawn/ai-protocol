@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/veildawn/ai-protocol/internal/cerr"
 	"github.com/veildawn/ai-protocol/internal/jsonx"
 	"github.com/veildawn/ai-protocol/types"
 )
@@ -183,7 +184,7 @@ func rejectUnsupported(body map[string]any, supported map[string]struct{}, drop 
 		if drop {
 			continue
 		}
-		return fmt.Errorf("unsupported openai param %q", k)
+		return cerr.UnsupportedParam{Param: k}
 	}
 	return nil
 }

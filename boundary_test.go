@@ -268,6 +268,7 @@ func TestVendorRulesCatchWhatTheyClaim(t *testing.T) {
 var boundarySurfaceAllowlist = map[string][]string{
 	"chatmessages":      {"ChatResponseToMessages", "ChatToMessages", "MessagesResponseToChat", "MessagesToChat", "PipeChatToMessages", "PipeMessagesToChat", "StreamOpts"},
 	"chatresponses":     {"ChatResponseToResponses", "ChatToResponses", "PipeChatToResponses", "PipeResponsesToChat", "ResponsesResponseToChat", "ResponsesToChat", "StreamOpts"},
+	"internal/cerr":     {"UnsupportedParam", "UnsupportedParam.Error"},
 	"internal/jsonx":    {"AsMap", "AsSlice", "Bool", "CloneMap", "GetString", "Int", "JoinText", "Marshal", "String", "UnmarshalMap"},
 	"messagesresponses": {"MessagesResponseToResponses", "MessagesToResponses", "PipeMessagesToResponses", "PipeResponsesToMessages", "ResponsesRequestToMessages", "ResponsesToMessages", "StreamOpts"},
 	"protocol": {
