@@ -58,6 +58,27 @@ func (e Event) Encode() string {
 	return b.String()
 }
 
+// WriteEventWith writes one SSE event, giving hook the TARGET event first — the
+// one about to be written — and writing whatever it returns. Returning the
+// argument unchanged is a pass-through, and a nil hook is the identity, so the
+// bytes written are exactly what WriteEvent has always written.
+//
+// The hook exists so a host can apply policy this library has no opinion about
+// to DECODED events instead of re-parsing serialized output. The policy stays
+// with the host: nothing here knows what a hook does.
+//
+// A hook error aborts the stream and is returned as a pipe error.
+func WriteEventWith(w io.Writer, e Event, flush func(), hook func(Event) (Event, error)) (int, error) {
+	if hook != nil {
+		next, err := hook(e)
+		if err != nil {
+			return 0, Fail("event hook", err)
+		}
+		e = next
+	}
+	return WriteEvent(w, e, flush)
+}
+
 func WriteEvent(w io.Writer, e Event, flush func()) (int, error) {
 	s := e.Encode()
 	n, err := io.WriteString(w, s)

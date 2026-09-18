@@ -24,6 +24,16 @@ type Converted struct {
 type StreamOpts struct {
 	Flush func()
 	Model string
+	// OnEvent, when set, sees every TARGET-dialect event immediately before it
+	// is written and returns the event to write instead. It is the host's seam
+	// for policy this library has no business knowing — a tool-naming
+	// convention, a redaction, a metric — applied to decoded events rather than
+	// by re-parsing serialized SSE. Nil is the identity.
+	//
+	// It is NOT called on the same-dialect path (from == to), which is a raw
+	// copy: there is no decoding there to hang a hook on. A caller that needs
+	// the hook is by construction on a translating pair.
+	OnEvent func(stream.Event) (stream.Event, error)
 }
 
 // ConvertOptions controls parameter handling during conversion.
@@ -172,27 +182,27 @@ func PipeStreamWith(from, to Dialect, dst io.Writer, source io.Reader, opts Stre
 		pipe = func(w io.Writer, r io.Reader) (int64, error) { return io.Copy(w, r) }
 	case src == Chat && dstDialect == Messages:
 		pipe = func(w io.Writer, r io.Reader) (int64, error) {
-			return chatmessages.PipeChatToMessages(w, r, chatmessages.StreamOpts{Flush: opts.Flush, Model: opts.Model})
+			return chatmessages.PipeChatToMessages(w, r, chatmessages.StreamOpts{Flush: opts.Flush, Model: opts.Model, OnEvent: opts.OnEvent})
 		}
 	case src == Messages && dstDialect == Chat:
 		pipe = func(w io.Writer, r io.Reader) (int64, error) {
-			return chatmessages.PipeMessagesToChat(w, r, chatmessages.StreamOpts{Flush: opts.Flush, Model: opts.Model})
+			return chatmessages.PipeMessagesToChat(w, r, chatmessages.StreamOpts{Flush: opts.Flush, Model: opts.Model, OnEvent: opts.OnEvent})
 		}
 	case src == Chat && dstDialect == Responses:
 		pipe = func(w io.Writer, r io.Reader) (int64, error) {
-			return chatresponses.PipeChatToResponses(w, r, chatresponses.StreamOpts{Flush: opts.Flush, Model: opts.Model})
+			return chatresponses.PipeChatToResponses(w, r, chatresponses.StreamOpts{Flush: opts.Flush, Model: opts.Model, OnEvent: opts.OnEvent})
 		}
 	case src == Responses && dstDialect == Chat:
 		pipe = func(w io.Writer, r io.Reader) (int64, error) {
-			return chatresponses.PipeResponsesToChat(w, r, chatresponses.StreamOpts{Flush: opts.Flush, Model: opts.Model})
+			return chatresponses.PipeResponsesToChat(w, r, chatresponses.StreamOpts{Flush: opts.Flush, Model: opts.Model, OnEvent: opts.OnEvent})
 		}
 	case src == Messages && dstDialect == Responses:
 		pipe = func(w io.Writer, r io.Reader) (int64, error) {
-			return messagesresponses.PipeMessagesToResponses(w, r, messagesresponses.StreamOpts{Flush: opts.Flush, Model: opts.Model})
+			return messagesresponses.PipeMessagesToResponses(w, r, messagesresponses.StreamOpts{Flush: opts.Flush, Model: opts.Model, OnEvent: opts.OnEvent})
 		}
 	case src == Responses && dstDialect == Messages:
 		pipe = func(w io.Writer, r io.Reader) (int64, error) {
-			return messagesresponses.PipeResponsesToMessages(w, r, messagesresponses.StreamOpts{Flush: opts.Flush, Model: opts.Model})
+			return messagesresponses.PipeResponsesToMessages(w, r, messagesresponses.StreamOpts{Flush: opts.Flush, Model: opts.Model, OnEvent: opts.OnEvent})
 		}
 	default:
 		return StreamResult{}, fmt.Errorf("unsupported stream conversion %s -> %s", src, dstDialect)

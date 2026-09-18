@@ -11,6 +11,9 @@ import (
 type StreamOpts struct {
 	Flush func()
 	Model string
+	// OnEvent, when set, sees every target-dialect event just before it is
+	// written and returns the event to write instead. See protocol.StreamOpts.
+	OnEvent func(stream.Event) (stream.Event, error)
 }
 
 func PipeChatToResponses(dst io.Writer, src io.Reader, opts StreamOpts) (int64, error) {
@@ -25,7 +28,7 @@ func PipeChatToResponses(dst io.Writer, src io.Reader, opts StreamOpts) (int64, 
 			return nil
 		}
 		for _, out := range st.feed(obj) {
-			nn, werr := stream.WriteEvent(dst, out, opts.Flush)
+			nn, werr := stream.WriteEventWith(dst, out, opts.Flush, opts.OnEvent)
 			n += int64(nn)
 			if werr != nil {
 				return werr
@@ -37,7 +40,7 @@ func PipeChatToResponses(dst io.Writer, src io.Reader, opts StreamOpts) (int64, 
 		return n, err
 	}
 	for _, out := range st.finish() {
-		nn, werr := stream.WriteEvent(dst, out, opts.Flush)
+		nn, werr := stream.WriteEventWith(dst, out, opts.Flush, opts.OnEvent)
 		n += int64(nn)
 		if werr != nil {
 			return n, werr
@@ -55,7 +58,7 @@ func PipeResponsesToChat(dst io.Writer, src io.Reader, opts StreamOpts) (int64, 
 			return nil
 		}
 		for _, out := range st.feed(ev.Event, obj) {
-			nn, werr := stream.WriteEvent(dst, out, opts.Flush)
+			nn, werr := stream.WriteEventWith(dst, out, opts.Flush, opts.OnEvent)
 			n += int64(nn)
 			if werr != nil {
 				return werr
@@ -67,7 +70,7 @@ func PipeResponsesToChat(dst io.Writer, src io.Reader, opts StreamOpts) (int64, 
 		return n, err
 	}
 	for _, out := range st.finish() {
-		nn, werr := stream.WriteEvent(dst, out, opts.Flush)
+		nn, werr := stream.WriteEventWith(dst, out, opts.Flush, opts.OnEvent)
 		n += int64(nn)
 		if werr != nil {
 			return n, werr
