@@ -42,6 +42,15 @@ type ConvertOptions struct {
 	// instead of returning UnsupportedParamError. The omission is still visible
 	// through the loss API.
 	DropParams bool
+	// MaxTokensFallback is the value inserted when a conversion INTO Messages
+	// would otherwise leave that dialect's required max_tokens field absent.
+	// Neither source dialect carries an equivalent, so the value cannot be
+	// derived from the body — it is host policy (typically the target model's
+	// published output ceiling), injected here rather than guessed, because
+	// guessing is vendor knowledge and the codec carries none. Zero leaves the
+	// field absent and the conversion fails with MissingRequiredFieldError:
+	// a body that would 400 at the upstream is a conversion bug reported late.
+	MaxTokensFallback int
 }
 
 // ConvertRequest maps a request body from dialect `from` to dialect `to`.
@@ -52,10 +61,11 @@ func ConvertRequest(from, to Dialect, body []byte) (Converted, error) {
 
 // ConvertRequestWith is ConvertRequest with explicit conversion options.
 func ConvertRequestWith(from, to Dialect, body []byte, opts ConvertOptions) (Converted, error) {
-	return convertRequest(from, to, body, opts.DropParams)
+	return convertRequest(from, to, body, opts)
 }
 
-func convertRequest(from, to Dialect, body []byte, dropParams bool) (Converted, error) {
+func convertRequest(from, to Dialect, body []byte, opts ConvertOptions) (Converted, error) {
+	dropParams := opts.DropParams
 	src, ok := Normalize(string(from))
 	if !ok {
 		return Converted{}, fmt.Errorf("unknown dialect %q", from)
@@ -94,6 +104,17 @@ func convertRequest(from, to Dialect, body []byte, dropParams bool) (Converted, 
 			return Converted{}, UnsupportedParamError{Param: p, From: src, To: dst}
 		}
 		return Converted{}, ConversionError{Op: "request", Err: err}
+	}
+	// Messages is the one dialect with a required field neither other dialect
+	// carries: a fold into it has to invent max_tokens, and inventing a value
+	// is host policy, not conversion mechanics.
+	if dst == Messages {
+		if _, ok := out["max_tokens"]; !ok {
+			if opts.MaxTokensFallback <= 0 {
+				return Converted{}, MissingRequiredFieldError{Field: "max_tokens", To: dst}
+			}
+			out["max_tokens"] = opts.MaxTokensFallback
+		}
 	}
 	b, err := jsonx.Marshal(out)
 	if err != nil {

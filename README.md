@@ -21,7 +21,9 @@ them.
 - Exactly three public dialects, request/response/SSE conversion between any
   pair of them, as pure functions.
 - Explicit error semantics: `UnsupportedParamError` for a parameter the target
-  dialect cannot carry, `ConversionError` for a body it cannot read, and
+  dialect cannot carry, `MissingRequiredFieldError` for a field the target
+  dialect requires that the caller declined to supply (Messages folds and
+  `max_tokens`), `ConversionError` for a body it cannot read, and
   `StreamResult` (`Terminal`/`Truncated`/`InBandErr`) for how a stream ended.
 - Offline and standard-library only. No module dependencies, no I/O, no clock.
 
@@ -49,9 +51,10 @@ vendor wire
 ```
 
 A host supplies **policy** through the seams on the options types — `Flush` for
-write-through, `OnEvent` for rewriting decoded stream events — and the policy
-itself stays in the host. Nothing in this library has an opinion about what a
-hook does.
+write-through, `OnEvent` for rewriting decoded stream events,
+`MaxTokensFallback` for the value of a required field a fold cannot derive —
+and the policy itself stays in the host. Nothing in this library has an opinion
+about what a hook does or what a supplied value should be.
 
 ## Usage
 

@@ -3,6 +3,7 @@ package protocol
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -511,5 +512,54 @@ func TestContextManagementMessagesToResponses(t *testing.T) {
 	cm := out["context_management"].([]any)[0].(map[string]any)
 	if cm["type"] != "compaction" || fmtInt(cm["compact_threshold"]) != 150000 {
 		t.Fatalf("%v", cm)
+	}
+}
+
+func TestMessagesFoldRequiresMaxTokens(t *testing.T) {
+	chat := []byte(`{"model":"some-model","messages":[{"role":"user","content":"hi"}]}`)
+
+	// No fallback: the conversion names the missing field instead of emitting
+	// a body the Messages upstream would reject.
+	_, err := ConvertRequest(Chat, Messages, chat)
+	var missing MissingRequiredFieldError
+	if !errors.As(err, &missing) || missing.Field != "max_tokens" || missing.To != Messages {
+		t.Fatalf("err = %v, want MissingRequiredFieldError{max_tokens, messages}", err)
+	}
+
+	// A host-supplied value fills the field.
+	out, err := ConvertRequestWith(Chat, Messages, chat, ConvertOptions{MaxTokensFallback: 4096})
+	if err != nil {
+		t.Fatalf("with fallback: %v", err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(out.Body, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if body["max_tokens"] != float64(4096) {
+		t.Fatalf("max_tokens = %v, want the host-supplied 4096", body["max_tokens"])
+	}
+
+	// A client-supplied value always wins over the fallback.
+	withTokens := []byte(`{"model":"some-model","max_tokens":512,"messages":[{"role":"user","content":"hi"}]}`)
+	out, err = ConvertRequestWith(Chat, Messages, withTokens, ConvertOptions{MaxTokensFallback: 4096})
+	if err != nil {
+		t.Fatalf("client value: %v", err)
+	}
+	if err := json.Unmarshal(out.Body, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if body["max_tokens"] != float64(512) {
+		t.Fatalf("max_tokens = %v, want the client's 512", body["max_tokens"])
+	}
+
+	// Conversions not targeting Messages are untouched by the option.
+	if _, err := ConvertRequest(Messages, Chat, []byte(`{"model":"m","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`)); err != nil {
+		t.Fatalf("messages->chat: %v", err)
+	}
+
+	// The Responses fold answers the same way.
+	responses := []byte(`{"model":"some-model","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`)
+	if _, err := ConvertRequest(Responses, Messages, responses); !errors.As(err, &missing) {
+		t.Fatalf("responses->messages without fallback: err = %v", err)
 	}
 }

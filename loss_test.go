@@ -54,8 +54,10 @@ func TestBodyLossesMatchConverterRejection(t *testing.T) {
 	}
 	for name, body := range bodies {
 		t.Run(name, func(t *testing.T) {
-			losses := BodyLosses(Chat, Messages, body, ConvertOptions{})
-			_, err := ConvertRequestWith(Chat, Messages, body, ConvertOptions{})
+			// A fallback keeps the required-field rule out of this test's way:
+			// the assertion is about LOSSES, not about max_tokens.
+			losses := BodyLosses(Chat, Messages, body, ConvertOptions{MaxTokensFallback: 8192})
+			_, err := ConvertRequestWith(Chat, Messages, body, ConvertOptions{MaxTokensFallback: 8192})
 			if losses != nil && err == nil {
 				t.Fatalf("loss=%v but conversion succeeded", losses)
 			}
@@ -68,7 +70,7 @@ func TestBodyLossesMatchConverterRejection(t *testing.T) {
 
 func TestConvertRequestWithDropsUnsupportedParams(t *testing.T) {
 	body := []byte(`{"model":"m","messages":[{"role":"user","content":"x"}],"seed":7}`)
-	got, err := ConvertRequestWith(Chat, Messages, body, ConvertOptions{DropParams: true})
+	got, err := ConvertRequestWith(Chat, Messages, body, ConvertOptions{DropParams: true, MaxTokensFallback: 8192})
 	if err != nil {
 		t.Fatalf("drop params conversion failed: %v", err)
 	}

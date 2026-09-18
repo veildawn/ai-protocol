@@ -25,3 +25,17 @@ func (e ConversionError) Error() string {
 }
 
 func (e ConversionError) Unwrap() error { return e.Err }
+
+// MissingRequiredFieldError is raised when a conversion cannot produce a field
+// the target dialect requires and the caller supplied no value for it. The
+// codec does not invent values — a required field's worth is host policy — so
+// the choice is explicit: pass it through ConvertOptions, or get this error
+// instead of a body the upstream would have rejected.
+type MissingRequiredFieldError struct {
+	Field string
+	To    Dialect
+}
+
+func (e MissingRequiredFieldError) Error() string {
+	return fmt.Sprintf("protocol: target dialect %s requires field %q; supply it via ConvertOptions", e.To, e.Field)
+}
