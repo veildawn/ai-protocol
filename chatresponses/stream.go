@@ -2,7 +2,10 @@ package chatresponses
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
+	"strconv"
+	"strings"
 
 	"github.com/veildawn/ai-protocol/internal/jsonx"
 	"github.com/veildawn/ai-protocol/stream"
@@ -79,12 +82,196 @@ func PipeResponsesToChat(dst io.Writer, src io.Reader, opts StreamOpts) (int64, 
 	return n, nil
 }
 
+// chatRespItem is one Responses output item being assembled from chat deltas.
+// Text accumulates in text regardless of kind: message output_text, reasoning
+// summary_text, or function_call arguments.
+type chatRespItem struct {
+	kind   string // "message" | "reasoning" | "function_call"
+	id     string
+	index  int
+	text   strings.Builder
+	callID string
+	name   string
+}
+
 type chatToRespState struct {
 	started bool
 	closed  bool
 	id      string
 	model   string
-	text    string
+
+	items   []*chatRespItem
+	nextIdx int
+	seq     int
+
+	msg    *chatRespItem            // the one message item, opened lazily
+	rs     *chatRespItem            // the one reasoning item, opened lazily
+	fcs    map[string]*chatRespItem // tool-call key → item
+	lastFC *chatRespItem            // fallback target for keyless arg fragments
+}
+
+func respEvent(typ string, fields map[string]any) stream.Event {
+	fields["type"] = typ
+	return stream.Event{Event: typ, Data: mustJSON(fields)}
+}
+
+func (s *chatToRespState) responseShell() map[string]any {
+	return map[string]any{
+		"id":     s.id,
+		"object": "response",
+		"model":  s.model,
+		"status": "in_progress",
+	}
+}
+
+func (s *chatToRespState) newItem(kind, prefix string) *chatRespItem {
+	it := &chatRespItem{kind: kind, id: fmt.Sprintf("%s_%d", prefix, s.seq), index: s.nextIdx}
+	s.seq++
+	s.nextIdx++
+	s.items = append(s.items, it)
+	return it
+}
+
+// openEvents emits the item's opening frame pair: output_item.added, then the
+// part frame text kinds need before their first delta.
+func (s *chatToRespState) openEvents(it *chatRespItem) []stream.Event {
+	var item map[string]any
+	var part stream.Event
+	switch it.kind {
+	case "reasoning":
+		item = map[string]any{"id": it.id, "type": "reasoning", "summary": []any{}}
+		part = respEvent("response.reasoning_summary_part.added", map[string]any{
+			"item_id": it.id, "output_index": it.index, "summary_index": 0,
+			"part": map[string]any{"type": "summary_text", "text": ""},
+		})
+	case "function_call":
+		item = map[string]any{
+			"id": it.id, "type": "function_call", "status": "in_progress",
+			"call_id": it.callID, "name": it.name, "arguments": "",
+		}
+	default:
+		item = map[string]any{
+			"id": it.id, "type": "message", "role": "assistant",
+			"status": "in_progress", "content": []any{},
+		}
+		part = respEvent("response.content_part.added", map[string]any{
+			"item_id": it.id, "output_index": it.index, "content_index": 0,
+			"part": map[string]any{"type": "output_text", "text": ""},
+		})
+	}
+	evs := []stream.Event{respEvent("response.output_item.added", map[string]any{
+		"output_index": it.index, "item": item,
+	})}
+	if part.Event != "" {
+		evs = append(evs, part)
+	}
+	return evs
+}
+
+// doneEvents emits the item's closing frames; the item snapshot they carry is
+// also what lands in response.completed's output array.
+func (s *chatToRespState) doneEvents(it *chatRespItem) []stream.Event {
+	var first stream.Event
+	switch it.kind {
+	case "function_call":
+		first = respEvent("response.function_call_arguments.done", map[string]any{
+			"item_id": it.id, "output_index": it.index, "arguments": it.text.String(),
+		})
+	case "reasoning":
+		first = respEvent("response.reasoning_summary_text.done", map[string]any{
+			"item_id": it.id, "output_index": it.index, "summary_index": 0,
+			"text": it.text.String(),
+		})
+	default:
+		first = respEvent("response.output_text.done", map[string]any{
+			"item_id": it.id, "output_index": it.index, "content_index": 0,
+			"text": it.text.String(),
+		})
+	}
+	evs := []stream.Event{first}
+	switch it.kind {
+	case "reasoning":
+		evs = append(evs, respEvent("response.reasoning_summary_part.done", map[string]any{
+			"item_id": it.id, "output_index": it.index, "summary_index": 0,
+			"part": map[string]any{"type": "summary_text", "text": it.text.String()},
+		}))
+	case "message":
+		evs = append(evs, respEvent("response.content_part.done", map[string]any{
+			"item_id": it.id, "output_index": it.index, "content_index": 0,
+			"part": map[string]any{"type": "output_text", "text": it.text.String()},
+		}))
+	}
+	return append(evs, respEvent("response.output_item.done", map[string]any{
+		"output_index": it.index, "item": it.snapshot(),
+	}))
+}
+
+func (it *chatRespItem) snapshot() map[string]any {
+	switch it.kind {
+	case "function_call":
+		return map[string]any{
+			"id": it.id, "type": "function_call", "status": "completed",
+			"call_id": it.callID, "name": it.name, "arguments": it.text.String(),
+		}
+	case "reasoning":
+		return map[string]any{
+			"id": it.id, "type": "reasoning",
+			"summary": []any{map[string]any{"type": "summary_text", "text": it.text.String()}},
+		}
+	default:
+		return map[string]any{
+			"id": it.id, "type": "message", "role": "assistant", "status": "completed",
+			"content": []any{map[string]any{"type": "output_text", "text": it.text.String()}},
+		}
+	}
+}
+
+func (s *chatToRespState) ensure(kind string) (*chatRespItem, []stream.Event) {
+	slot := &s.msg
+	prefix := "msg"
+	if kind == "reasoning" {
+		slot = &s.rs
+		prefix = "rs"
+	}
+	if *slot != nil {
+		return *slot, nil
+	}
+	it := s.newItem(kind, prefix)
+	*slot = it
+	return it, s.openEvents(it)
+}
+
+// fcFor resolves a tool_calls delta fragment to its item. Fragments key by
+// `index` when present (the parallel-call slot) else by `id`; a fragment with
+// neither continues whichever call is open. `id` alone is never the trigger
+// for a new item — real upstreams repeat it on every fragment, which is what
+// used to mint a fresh output_item.added per chunk.
+func (s *chatToRespState) fcFor(tm map[string]any) (*chatRespItem, []stream.Event) {
+	key := ""
+	if idx, ok := jsonx.Int(tm["index"]); ok {
+		key = "i" + strconv.Itoa(idx)
+	} else if cid := jsonx.GetString(tm, "id"); cid != "" {
+		key = "c" + cid
+	} else if s.lastFC != nil {
+		return s.lastFC, nil
+	} else {
+		key = "i0"
+	}
+	if s.fcs == nil {
+		s.fcs = map[string]*chatRespItem{}
+	}
+	if it := s.fcs[key]; it != nil {
+		s.lastFC = it
+		return it, nil
+	}
+	it := s.newItem("function_call", "fc")
+	it.callID = jsonx.GetString(tm, "id")
+	if fn, _ := jsonx.AsMap(tm["function"]); fn != nil {
+		it.name = jsonx.GetString(fn, "name")
+	}
+	s.fcs[key] = it
+	s.lastFC = it
+	return it, s.openEvents(it)
 }
 
 func (s *chatToRespState) feed(obj map[string]any) []stream.Event {
@@ -97,36 +284,32 @@ func (s *chatToRespState) feed(obj map[string]any) []stream.Event {
 	var evs []stream.Event
 	if !s.started {
 		s.started = true
-		evs = append(evs, stream.Event{Event: "response.created", Data: mustJSON(map[string]any{
-			"type": "response.created",
-			"response": map[string]any{
-				"id":     s.id,
-				"object": "response",
-				"model":  s.model,
-				"status": "in_progress",
-			},
-		})})
-		evs = append(evs, stream.Event{Event: "response.output_item.added", Data: mustJSON(map[string]any{
-			"type":         "response.output_item.added",
-			"output_index": 0,
-			"item":         map[string]any{"type": "message", "role": "assistant", "content": []any{}},
-		})})
+		evs = append(evs,
+			respEvent("response.created", map[string]any{"response": s.responseShell()}),
+			respEvent("response.in_progress", map[string]any{"response": s.responseShell()}),
+		)
 	}
 	choices, _ := jsonx.AsSlice(obj["choices"])
 	if len(choices) > 0 {
 		ch, _ := jsonx.AsMap(choices[0])
 		delta, _ := jsonx.AsMap(ch["delta"])
 		if delta != nil {
+			if rc := jsonx.String(delta["reasoning_content"]); rc != "" {
+				it, open := s.ensure("reasoning")
+				evs = append(evs, open...)
+				it.text.WriteString(rc)
+				evs = append(evs, respEvent("response.reasoning_summary_text.delta", map[string]any{
+					"item_id": it.id, "output_index": it.index, "summary_index": 0, "delta": rc,
+				}))
+			}
 			if c := delta["content"]; c != nil {
-				text := jsonx.String(c)
-				if text != "" {
-					s.text += text
-					evs = append(evs, stream.Event{Event: "response.output_text.delta", Data: mustJSON(map[string]any{
-						"type":          "response.output_text.delta",
-						"delta":         text,
-						"output_index":  0,
-						"content_index": 0,
-					})})
+				if text := jsonx.String(c); text != "" {
+					it, open := s.ensure("message")
+					evs = append(evs, open...)
+					it.text.WriteString(text)
+					evs = append(evs, respEvent("response.output_text.delta", map[string]any{
+						"item_id": it.id, "output_index": it.index, "content_index": 0, "delta": text,
+					}))
 				}
 			}
 			if tcs, ok := jsonx.AsSlice(delta["tool_calls"]); ok {
@@ -136,27 +319,21 @@ func (s *chatToRespState) feed(obj map[string]any) []stream.Event {
 						continue
 					}
 					fn, _ := jsonx.AsMap(tm["function"])
-					args := ""
-					name := ""
+					args, name := "", ""
 					if fn != nil {
 						args = jsonx.GetString(fn, "arguments")
 						name = jsonx.GetString(fn, "name")
 					}
-					if name != "" || jsonx.GetString(tm, "id") != "" {
-						evs = append(evs, stream.Event{Event: "response.output_item.added", Data: mustJSON(map[string]any{
-							"type": "response.output_item.added",
-							"item": map[string]any{
-								"type":    "function_call",
-								"call_id": jsonx.GetString(tm, "id"),
-								"name":    name,
-							},
-						})})
+					it, open := s.fcFor(tm)
+					evs = append(evs, open...)
+					if it.name == "" {
+						it.name = name
 					}
 					if args != "" {
-						evs = append(evs, stream.Event{Event: "response.function_call_arguments.delta", Data: mustJSON(map[string]any{
-							"type":  "response.function_call_arguments.delta",
-							"delta": args,
-						})})
+						it.text.WriteString(args)
+						evs = append(evs, respEvent("response.function_call_arguments.delta", map[string]any{
+							"item_id": it.id, "output_index": it.index, "delta": args,
+						}))
 					}
 				}
 			}
@@ -173,23 +350,21 @@ func (s *chatToRespState) complete(usage any, finish string) []stream.Event {
 		return nil
 	}
 	s.closed = true
+	var evs []stream.Event
+	output := make([]any, 0, len(s.items))
+	for _, it := range s.items {
+		evs = append(evs, s.doneEvents(it)...)
+		output = append(output, it.snapshot())
+	}
 	resp := map[string]any{
 		"id":     s.id,
 		"object": "response",
 		"model":  s.model,
 		"status": finishToStatus(finish),
-		"output": []any{
-			map[string]any{
-				"type":    "message",
-				"role":    "assistant",
-				"content": []any{map[string]any{"type": "output_text", "text": s.text}},
-			},
-		},
-		"usage": chatUsageToResponses(usage),
+		"output": output,
+		"usage":  chatUsageToResponses(usage),
 	}
-	return []stream.Event{
-		{Event: "response.completed", Data: mustJSON(map[string]any{"type": "response.completed", "response": resp})},
-	}
+	return append(evs, respEvent("response.completed", map[string]any{"response": resp}))
 }
 
 func (s *chatToRespState) finish() []stream.Event {
