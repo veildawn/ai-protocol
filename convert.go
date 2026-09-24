@@ -233,7 +233,7 @@ func PipeStreamWith(from, to Dialect, dst io.Writer, source io.Reader, opts Stre
 	}
 
 	observer := &stream.Observer{}
-	tee := observeReader{r: source, observer: observer}
+	tee := &observeReader{r: source, observer: observer}
 	n, err := pipe(dst, tee)
 	result := StreamResult{Written: n}
 	// A source in-band error is returned to stop scanning; retain it as metadata
@@ -247,18 +247,35 @@ func PipeStreamWith(from, to Dialect, dst io.Writer, source io.Reader, opts Stre
 	return result, err
 }
 
+// observeReader feeds the observer the same bytes the pipe reads, parsed as a
+// STREAM rather than one read at a time.
+//
+// Scanning each read in isolation was a bug the gateway could not see past: an
+// SSE event routinely straddles two reads — the terminal response.completed
+// frame, which re-serializes the whole response, is the largest event in the
+// stream — and half an event parses as neither. The observer then reported a
+// stream that HAD terminated as truncated, so a host that bills on StreamResult
+// booked a delivered turn as a failed delivery (and cooled the account for it)
+// while the client, fed by the converter's own cross-read scan, held a complete
+// answer. The reported symptom was "upstream stream truncated before terminal
+// frame" on requests that had, in fact, completed.
+//
+// Bytes are buffered until their terminating blank line arrives; whatever is
+// left when the stream ends is flushed exactly as stream.Scan flushes it, so an
+// upstream that closes right after the last frame's JSON is still observed.
 type observeReader struct {
 	r        io.Reader
 	observer *stream.Observer
+	// tail is the event being received: everything after the last blank line.
+	// An event that never terminates is the codec's problem (its own scan has
+	// the same ceiling), so this stays as small as the codec's line budget.
+	tail []byte
 }
 
-func (o observeReader) Read(p []byte) (int, error) {
+func (o *observeReader) Read(p []byte) (int, error) {
 	n, err := o.r.Read(p)
 	if n > 0 {
-		// Feed each SSE-sized read through the observer. Scanner returns the
-		// same buffer repeatedly, so Scan must copy; this wrapper intentionally
-		// works one read at a time.
-		if scanErr := stream.Scan(bytes.NewReader(p[:n]), o.observer.Feed); scanErr != nil {
+		if scanErr := o.feed(p[:n]); scanErr != nil {
 			if o.observer.Result.InBandErr != nil && errors.Is(scanErr, o.observer.Result.InBandErr) {
 				return n, err
 			}
@@ -267,7 +284,50 @@ func (o observeReader) Read(p []byte) (int, error) {
 			}
 		}
 	}
+	if err != nil && len(o.tail) > 0 {
+		if scanErr := o.flush(); scanErr != nil {
+			if !(o.observer.Result.InBandErr != nil && errors.Is(scanErr, o.observer.Result.InBandErr)) && err == nil {
+				err = scanErr
+			}
+		}
+	}
 	return n, err
+}
+
+// feed appends one read's bytes and hands every event that has arrived whole to
+// the observer, keeping the unfinished tail for the next read.
+func (o *observeReader) feed(chunk []byte) error {
+	o.tail = append(o.tail, chunk...)
+	end := lastEventEnd(o.tail)
+	if end < 0 {
+		return nil
+	}
+	complete := o.tail[:end]
+	copy(o.tail, o.tail[end:])
+	o.tail = o.tail[:len(o.tail)-end]
+	return stream.Scan(bytes.NewReader(complete), o.observer.Feed)
+}
+
+// flush hands the observer what the stream left un-terminated: an upstream may
+// close right after the last frame, without its blank line.
+func (o *observeReader) flush() error {
+	rest := o.tail
+	o.tail = nil
+	return stream.Scan(bytes.NewReader(rest), o.observer.Feed)
+}
+
+// lastEventEnd is the index just past the last complete SSE event in buf, or -1
+// when no blank line has arrived yet. CRLF is accepted because bufio's
+// ScanLines (what stream.Scan reads with) accepts it.
+func lastEventEnd(buf []byte) int {
+	end := -1
+	if i := bytes.LastIndex(buf, []byte("\n\n")); i >= 0 {
+		end = i + 2
+	}
+	if i := bytes.LastIndex(buf, []byte("\r\n\r\n")); i >= 0 && i+4 > end {
+		end = i + 4
+	}
+	return end
 }
 
 func peekModel(body []byte) string {
