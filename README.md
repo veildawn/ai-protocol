@@ -69,9 +69,15 @@ n, err := protocol.PipeStream(protocol.Messages, protocol.Chat, dst, src, protoc
 Same-dialect calls return the original bytes unchanged.
 
 Streaming takes an optional per-event hook, applied to every target-dialect
-event just before it is written — including the terminal frames the converter
-synthesizes. It is how a host applies a rewriting this library does not know
-about without re-parsing serialized SSE:
+event just before it is written — including the terminal frames a fold
+synthesizes. A fold closes the turn for the client only when the **source**
+closed it too: Responses and Messages have exactly one legal ending, so a stream
+that stops without it is a truncation, the fold leaves the turn open, and
+`StreamResult.Truncated` tells the host (which is where the failure the host
+records and the failure the client sees become the same failure). A Chat source
+is the exception, because several vendors close on a usage chunk instead of
+`[DONE]`: its folds still close the turn for the client. It is how a host applies
+a rewriting this library does not know about without re-parsing serialized SSE:
 
 ```go
 result, err := protocol.PipeStreamWith(protocol.Chat, protocol.Responses, dst, src, protocol.StreamOpts{

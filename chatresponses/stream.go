@@ -52,15 +52,24 @@ func PipeChatToResponses(dst io.Writer, src io.Reader, opts StreamOpts) (int64, 
 	return n, nil
 }
 
+// PipeResponsesToChat folds a Responses SSE stream into chat.completion.chunk
+// events.
+//
+// The chat client is told the turn finished only when the SOURCE said so:
+// response.completed, response.incomplete (a ceiling cut, reported as
+// finish_reason "length"), or the [DONE] sentinel a relay dialect appends after
+// the typed events. A Responses source that ends with none of those is a
+// truncated turn — the dialect has no other legal ending — and inventing a
+// "stop" for it would tell the client it holds a finished answer while the host
+// running this pipe records a failed delivery for the same turn (StreamResult
+// carries it as Truncated, and the host shows the client what it recorded).
+// That disagreement is how a turn the client rendered as complete ended up
+// logged as a 502 with the account cooled for it.
 func PipeResponsesToChat(dst io.Writer, src io.Reader, opts StreamOpts) (int64, error) {
 	st := &respToChatState{model: opts.Model, id: "chatcmpl-unknown"}
 	var n int64
-	err := stream.Scan(src, func(ev stream.Event) error {
-		obj, err := jsonx.UnmarshalMap([]byte(ev.Data))
-		if err != nil {
-			return nil
-		}
-		for _, out := range st.feed(ev.Event, obj) {
+	write := func(evs []stream.Event) error {
+		for _, out := range evs {
 			nn, werr := stream.WriteEventWith(dst, out, opts.Flush, opts.OnEvent)
 			n += int64(nn)
 			if werr != nil {
@@ -68,16 +77,22 @@ func PipeResponsesToChat(dst io.Writer, src io.Reader, opts StreamOpts) (int64, 
 			}
 		}
 		return nil
+	}
+	err := stream.Scan(src, func(ev stream.Event) error {
+		// [DONE] is the one close a relay dialect writes instead of the typed
+		// terminal, so it closes the chat turn here. An EOF with no close at all
+		// deliberately does not — see the doc comment.
+		if stream.IsDone(ev.Data) {
+			return write(st.finishFromSource())
+		}
+		obj, err := jsonx.UnmarshalMap([]byte(ev.Data))
+		if err != nil {
+			return nil
+		}
+		return write(st.feed(ev.Event, obj))
 	})
 	if err != nil {
 		return n, err
-	}
-	for _, out := range st.finish() {
-		nn, werr := stream.WriteEventWith(dst, out, opts.Flush, opts.OnEvent)
-		n += int64(nn)
-		if werr != nil {
-			return n, werr
-		}
 	}
 	return n, nil
 }
@@ -425,12 +440,22 @@ func (s *respToChatState) feed(event string, obj map[string]any) []stream.Event 
 			}, nil)}
 		}
 		return nil
-	case "response.completed":
+	case "response.completed", "response.incomplete":
 		s.done = true
 		resp, _ := jsonx.AsMap(obj["response"])
-		finish := "stop"
+		// The event name is authoritative for a ceiling cut: a backend that
+		// omits response.status would otherwise report "stop" for a turn the
+		// request's max_output_tokens cut short.
+		status := "completed"
+		if typ == "response.incomplete" {
+			status = "incomplete"
+		} else if resp != nil {
+			if got := jsonx.GetString(resp, "status"); got != "" {
+				status = got
+			}
+		}
+		finish := statusToFinish(status, false)
 		if resp != nil {
-			finish = statusToFinish(jsonx.GetString(resp, "status"), false)
 			if out, ok := jsonx.AsSlice(resp["output"]); ok {
 				for _, it := range out {
 					if im, ok := jsonx.AsMap(it); ok && jsonx.GetString(im, "type") == "function_call" {
@@ -444,6 +469,13 @@ func (s *respToChatState) feed(event string, obj map[string]any) []stream.Event 
 			chunk["usage"] = responsesUsageToChat(resp["usage"])
 		}
 		return []stream.Event{{Data: mustJSON(chunk)}, {Data: "[DONE]"}}
+	case "response.failed", "error":
+		// The upstream declared the turn failed. Emit nothing: the frame the
+		// client has to see is the host's error frame for the failed delivery,
+		// and a synthesized "stop" here would dress that failure as a finished
+		// answer. done also keeps a trailing [DONE] from closing the turn.
+		s.done = true
+		return nil
 	default:
 		return nil
 	}
@@ -464,7 +496,11 @@ func (s *respToChatState) full(delta map[string]any, finish any) map[string]any 
 	}
 }
 
-func (s *respToChatState) finish() []stream.Event {
+// finishFromSource emits the chat terminal for a source that closed itself
+// with the [DONE] sentinel rather than a typed terminal frame. It is idempotent,
+// and it is reached only from the source's own close — never from EOF, where the
+// missing terminal IS the upstream's failure (see PipeResponsesToChat).
+func (s *respToChatState) finishFromSource() []stream.Event {
 	if s.done {
 		return nil
 	}

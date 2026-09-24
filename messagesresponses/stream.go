@@ -18,15 +18,21 @@ type StreamOpts struct {
 	OnEvent func(stream.Event) (stream.Event, error)
 }
 
+// PipeMessagesToResponses folds an Anthropic Messages SSE stream into
+// Responses events.
+//
+// The Responses client is told the turn finished only when the SOURCE said so:
+// message_stop, or the [DONE] sentinel a relay dialect appends instead. A
+// Messages source that ends with neither was cut — the dialect has no other
+// legal ending — and synthesizing response.completed for it would tell the
+// client it holds a finished turn while the host records a failed delivery for
+// the same one (StreamResult carries it as Truncated). See PipeResponsesToChat
+// for the worked case that made this the rule.
 func PipeMessagesToResponses(dst io.Writer, src io.Reader, opts StreamOpts) (int64, error) {
 	st := &msgToResp{model: opts.Model}
 	var n int64
-	err := stream.Scan(src, func(ev stream.Event) error {
-		obj, err := jsonx.UnmarshalMap([]byte(ev.Data))
-		if err != nil {
-			return nil
-		}
-		for _, out := range st.feed(ev.Event, obj) {
+	write := func(evs []stream.Event) error {
+		for _, out := range evs {
 			nn, werr := stream.WriteEventWith(dst, out, opts.Flush, opts.OnEvent)
 			n += int64(nn)
 			if werr != nil {
@@ -34,29 +40,41 @@ func PipeMessagesToResponses(dst io.Writer, src io.Reader, opts StreamOpts) (int
 			}
 		}
 		return nil
+	}
+	err := stream.Scan(src, func(ev stream.Event) error {
+		// [DONE] is the one close a relay dialect writes instead of the typed
+		// terminal, so it closes the turn here. An EOF with no close at all
+		// deliberately does not — see the doc comment.
+		if stream.IsDone(ev.Data) {
+			return write(st.finishFromSource())
+		}
+		obj, err := jsonx.UnmarshalMap([]byte(ev.Data))
+		if err != nil {
+			return nil
+		}
+		return write(st.feed(ev.Event, obj))
 	})
 	if err != nil {
 		return n, err
-	}
-	for _, out := range st.finish() {
-		nn, werr := stream.WriteEventWith(dst, out, opts.Flush, opts.OnEvent)
-		n += int64(nn)
-		if werr != nil {
-			return n, werr
-		}
 	}
 	return n, nil
 }
 
+// PipeResponsesToMessages folds a Responses SSE stream into Anthropic Messages
+// events.
+//
+// The Messages client is told the turn finished only when the SOURCE said so:
+// response.completed, response.incomplete, or the [DONE] sentinel a relay
+// dialect appends instead. A Responses source that ends with none of those was
+// cut — the dialect has no other legal ending — and synthesizing message_stop
+// for it would tell the client it holds a finished turn while the host records a
+// failed delivery for the same one (StreamResult carries it as Truncated). See
+// PipeResponsesToChat for the worked case that made this the rule.
 func PipeResponsesToMessages(dst io.Writer, src io.Reader, opts StreamOpts) (int64, error) {
 	st := &respToMsg{model: opts.Model}
 	var n int64
-	err := stream.Scan(src, func(ev stream.Event) error {
-		obj, err := jsonx.UnmarshalMap([]byte(ev.Data))
-		if err != nil {
-			return nil
-		}
-		for _, out := range st.feed(ev.Event, obj) {
+	write := func(evs []stream.Event) error {
+		for _, out := range evs {
 			nn, werr := stream.WriteEventWith(dst, out, opts.Flush, opts.OnEvent)
 			n += int64(nn)
 			if werr != nil {
@@ -64,16 +82,22 @@ func PipeResponsesToMessages(dst io.Writer, src io.Reader, opts StreamOpts) (int
 			}
 		}
 		return nil
+	}
+	err := stream.Scan(src, func(ev stream.Event) error {
+		// [DONE] is the one close a relay dialect writes instead of the typed
+		// terminal, so it closes the turn here. An EOF with no close at all
+		// deliberately does not — see the doc comment.
+		if stream.IsDone(ev.Data) {
+			return write(st.finishFromSource())
+		}
+		obj, err := jsonx.UnmarshalMap([]byte(ev.Data))
+		if err != nil {
+			return nil
+		}
+		return write(st.feed(ev.Event, obj))
 	})
 	if err != nil {
 		return n, err
-	}
-	for _, out := range st.finish() {
-		nn, werr := stream.WriteEventWith(dst, out, opts.Flush, opts.OnEvent)
-		n += int64(nn)
-		if werr != nil {
-			return n, werr
-		}
 	}
 	return n, nil
 }
@@ -348,6 +372,12 @@ func (s *msgToResp) feed(event string, obj map[string]any) []stream.Event {
 		}
 	case "message_stop":
 		evs = append(evs, s.complete()...)
+	case "error":
+		// The upstream declared the turn failed. Emit nothing: the frame the
+		// client has to see is the host's error frame for the failed delivery,
+		// and a synthesized terminal here would dress that failure as a
+		// finished turn.
+		s.closed = true
 	}
 	return evs
 }
@@ -389,7 +419,11 @@ func (s *msgToResp) complete() []stream.Event {
 	return append(evs, respEvent("response.completed", map[string]any{"response": resp}))
 }
 
-func (s *msgToResp) finish() []stream.Event {
+// finishFromSource completes the turn for a source that closed itself with the
+// [DONE] sentinel rather than message_stop. Idempotent, and reached only from
+// the source's own close — never from EOF, where the missing terminal IS the
+// upstream's failure (see PipeMessagesToResponses).
+func (s *msgToResp) finishFromSource() []stream.Event {
 	if s.closed || !s.started {
 		return nil
 	}
@@ -485,6 +519,12 @@ func (s *respToMsg) feed(event string, obj map[string]any) []stream.Event {
 		})})
 		evs = append(evs, stream.Event{Event: "message_stop", Data: mustJSON(map[string]any{"type": "message_stop"})})
 		s.closed = true
+	case "response.failed", "error":
+		// The upstream declared the turn failed. Emit nothing: the frame the
+		// client has to see is the host's error frame for the failed delivery,
+		// and a synthesized terminal here would dress that failure as a
+		// finished turn.
+		s.closed = true
 	}
 	return evs
 }
@@ -518,7 +558,11 @@ func (s *respToMsg) close() []stream.Event {
 	})}}
 }
 
-func (s *respToMsg) finish() []stream.Event {
+// finishFromSource closes the turn for a source that closed itself with the
+// [DONE] sentinel rather than response.completed. Idempotent, and reached only
+// from the source's own close — never from EOF, where the missing terminal IS
+// the upstream's failure (see PipeResponsesToMessages).
+func (s *respToMsg) finishFromSource() []stream.Event {
 	if s.closed || !s.started {
 		return nil
 	}

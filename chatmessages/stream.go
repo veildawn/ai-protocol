@@ -50,15 +50,21 @@ func PipeChatToMessages(dst io.Writer, src io.Reader, opts StreamOpts) (int64, e
 	return n, nil
 }
 
+// PipeMessagesToChat folds an Anthropic Messages SSE stream into
+// chat.completion.chunk events.
+//
+// The chat client is told the turn finished only when the SOURCE said so:
+// message_stop, or the [DONE] sentinel a relay dialect appends instead. A
+// Messages source that ends with neither was cut — the dialect has no other
+// legal ending — and inventing a "stop" for it would tell the client it holds a
+// finished answer while the host records a failed delivery for the same turn
+// (StreamResult carries it as Truncated). See PipeResponsesToChat for the worked
+// case that made this the rule.
 func PipeMessagesToChat(dst io.Writer, src io.Reader, opts StreamOpts) (int64, error) {
 	st := &msgToChatState{model: opts.Model, id: "chatcmpl-unknown"}
 	var n int64
-	err := stream.Scan(src, func(ev stream.Event) error {
-		obj, err := jsonx.UnmarshalMap([]byte(ev.Data))
-		if err != nil {
-			return nil
-		}
-		for _, out := range st.feedAnthropic(ev.Event, obj) {
+	write := func(evs []stream.Event) error {
+		for _, out := range evs {
 			nn, werr := stream.WriteEventWith(dst, out, opts.Flush, opts.OnEvent)
 			n += int64(nn)
 			if werr != nil {
@@ -66,16 +72,22 @@ func PipeMessagesToChat(dst io.Writer, src io.Reader, opts StreamOpts) (int64, e
 			}
 		}
 		return nil
+	}
+	err := stream.Scan(src, func(ev stream.Event) error {
+		// [DONE] is the one close a relay dialect writes instead of the typed
+		// terminal, so it closes the chat turn here. An EOF with no close at all
+		// deliberately does not — see the doc comment.
+		if stream.IsDone(ev.Data) {
+			return write(st.finishFromSource())
+		}
+		obj, err := jsonx.UnmarshalMap([]byte(ev.Data))
+		if err != nil {
+			return nil
+		}
+		return write(st.feedAnthropic(ev.Event, obj))
 	})
 	if err != nil {
 		return n, err
-	}
-	for _, out := range st.finish() {
-		nn, werr := stream.WriteEventWith(dst, out, opts.Flush, opts.OnEvent)
-		n += int64(nn)
-		if werr != nil {
-			return n, werr
-		}
 	}
 	return n, nil
 }
@@ -332,6 +344,13 @@ func (s *msgToChatState) feedAnthropic(event string, obj map[string]any) []strea
 	case "message_stop":
 		s.done = true
 		return []stream.Event{{Data: "[DONE]"}}
+	case "error":
+		// The upstream declared the turn failed. Emit nothing: the frame the
+		// client has to see is the host's error frame for the failed delivery,
+		// and a synthesized "stop" here would dress that failure as a finished
+		// answer. done also keeps a trailing [DONE] from closing the turn.
+		s.done = true
+		return nil
 	default:
 		return nil
 	}
@@ -360,7 +379,11 @@ func (s *msgToChatState) fullChunk(delta map[string]any, finish any) map[string]
 	}
 }
 
-func (s *msgToChatState) finish() []stream.Event {
+// finishFromSource emits the chat terminal for a source that closed itself with
+// the [DONE] sentinel rather than message_stop. Idempotent, and reached only
+// from the source's own close — never from EOF, where the missing terminal IS
+// the upstream's failure (see PipeMessagesToChat).
+func (s *msgToChatState) finishFromSource() []stream.Event {
 	if s.done {
 		return nil
 	}
