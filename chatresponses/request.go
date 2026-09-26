@@ -71,9 +71,11 @@ func ResponsesToChat(body map[string]any) (map[string]any, error) {
 		out["model"] = model
 	}
 	input := body["input"]
-	msgs := responsesInputToChatMessages(input)
-	if inst := jsonx.GetString(body, "instructions"); inst != "" {
-		msgs = append([]any{map[string]any{"role": "system", "content": inst}}, msgs...)
+	msgs, inputInstructions := responsesInputToChatMessages(input)
+	instructions := appendInstruction(nil, jsonx.GetString(body, "instructions"))
+	instructions = append(instructions, inputInstructions...)
+	if len(instructions) > 0 {
+		msgs = append([]any{map[string]any{"role": "system", "content": strings.Join(instructions, "\n")}}, msgs...)
 	}
 	out["messages"] = msgs
 	if v, ok := body["max_output_tokens"]; ok {
@@ -133,7 +135,7 @@ func chatMessagesToResponsesInput(msgs []any) (instructions string, input []any)
 		}
 		role := jsonx.GetString(m, "role")
 		if role == "system" || role == "developer" {
-			inst = append(inst, contentToPlain(m["content"]))
+			inst = appendInstruction(inst, contentToPlain(m["content"]))
 			continue
 		}
 		if role == "tool" {
@@ -195,6 +197,13 @@ func chatMessagesToResponsesInput(msgs []any) (instructions string, input []any)
 	return strings.Join(inst, "\n"), input
 }
 
+func appendInstruction(instructions []string, text string) []string {
+	if text = strings.TrimSpace(text); text != "" {
+		return append(instructions, text)
+	}
+	return instructions
+}
+
 func chatContentToInputParts(content any) []any {
 	switch c := content.(type) {
 	case string:
@@ -226,15 +235,16 @@ func chatContentToInputParts(content any) []any {
 	}
 }
 
-func responsesInputToChatMessages(input any) []any {
+func responsesInputToChatMessages(input any) ([]any, []string) {
 	if s, ok := input.(string); ok {
-		return []any{map[string]any{"role": "user", "content": s}}
+		return []any{map[string]any{"role": "user", "content": s}}, nil
 	}
 	list, ok := jsonx.AsSlice(input)
 	if !ok {
-		return []any{}
+		return []any{}, nil
 	}
 	var msgs []any
+	var instructions []string
 	for _, item := range list {
 		m, ok := jsonx.AsMap(item)
 		if !ok {
@@ -275,7 +285,7 @@ func responsesInputToChatMessages(input any) []any {
 				role = "user"
 			}
 			if role == "system" || role == "developer" {
-				msgs = append(msgs, map[string]any{"role": "system", "content": partsToText(m["content"], "input_text", "output_text", "text")})
+				instructions = appendInstruction(instructions, partsToText(m["content"], "input_text", "output_text", "text"))
 				continue
 			}
 			content, images := partsToChatContent(m["content"], role)
@@ -284,7 +294,7 @@ func responsesInputToChatMessages(input any) []any {
 			msgs = append(msgs, msg)
 		}
 	}
-	return msgs
+	return msgs, instructions
 }
 
 func partsToChatContent(content any, role string) (any, bool) {
@@ -339,7 +349,7 @@ func partsToText(content any, types ...string) string {
 			continue
 		}
 		if _, ok := want[jsonx.GetString(pm, "type")]; ok || jsonx.GetString(pm, "type") == "" {
-			parts = append(parts, jsonx.GetString(pm, "text"))
+			parts = appendInstruction(parts, jsonx.GetString(pm, "text"))
 		}
 	}
 	return strings.Join(parts, "\n")
