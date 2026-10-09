@@ -416,7 +416,12 @@ func (s *msgToResp) complete() []stream.Event {
 		"output": output,
 		"usage":  usage,
 	}
-	return append(evs, respEvent("response.completed", map[string]any{"response": resp}))
+	typ := "response.completed"
+	if status == "incomplete" {
+		typ = "response.incomplete"
+		resp["incomplete_details"] = map[string]any{"reason": "max_output_tokens"}
+	}
+	return append(evs, respEvent(typ, map[string]any{"response": resp}))
 }
 
 // finishFromSource completes the turn for a source that closed itself with the
@@ -494,9 +499,12 @@ func (s *respToMsg) feed(event string, obj map[string]any) []stream.Event {
 			"type": "content_block_delta", "index": s.blockIndex,
 			"delta": map[string]any{"type": "thinking_delta", "thinking": jsonx.String(obj["delta"])},
 		})})
-	case "response.completed":
+	case "response.completed", "response.incomplete":
 		evs = append(evs, s.close()...)
 		stop := "end_turn"
+		if typ == "response.incomplete" {
+			stop = "max_tokens"
+		}
 		resp, _ := jsonx.AsMap(obj["response"])
 		usage := any(nil)
 		if resp != nil {

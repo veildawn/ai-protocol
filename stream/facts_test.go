@@ -111,6 +111,32 @@ func TestClassifyStreamEventFacts(t *testing.T) {
 			wantTerminal: true,
 		},
 		{
+			// A relay may fold a ceiling cut into the Responses shape and close
+			// it under response.completed while status still says incomplete.
+			// The name alone would call that a success and hide the truncation.
+			name:         "responses completed with incomplete status is not a success",
+			dialect:      Responses,
+			event:        Event{Data: `{"type":"response.completed","response":{"status":"incomplete","output":[]}}`},
+			want:         EventIncomplete,
+			wantTerminal: true,
+		},
+		{
+			name:         "responses completed with top-level incomplete status is not a success",
+			dialect:      Responses,
+			event:        Event{Data: `{"type":"response.completed","status":"incomplete","response":{"output":[]}}`},
+			want:         EventIncomplete,
+			wantTerminal: true,
+		},
+		{
+			// The common case must not regress: an explicit completed status
+			// still classifies as a completion.
+			name:         "responses completed with completed status stays complete",
+			dialect:      Responses,
+			event:        Event{Data: `{"type":"response.completed","response":{"status":"completed","output":[]}}`},
+			want:         EventComplete,
+			wantTerminal: true,
+		},
+		{
 			name:         "responses failure is explicit",
 			dialect:      Responses,
 			event:        Event{Data: `{"type":"response.failed","response":{"error":{"message":"denied"}}}`},

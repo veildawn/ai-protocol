@@ -371,15 +371,21 @@ func (s *chatToRespState) complete(usage any, finish string) []stream.Event {
 		evs = append(evs, s.doneEvents(it)...)
 		output = append(output, it.snapshot())
 	}
+	status := finishToStatus(finish)
 	resp := map[string]any{
 		"id":     s.id,
 		"object": "response",
 		"model":  s.model,
-		"status": finishToStatus(finish),
+		"status": status,
 		"output": output,
 		"usage":  chatUsageToResponses(usage),
 	}
-	return append(evs, respEvent("response.completed", map[string]any{"response": resp}))
+	typ := "response.completed"
+	if status == "incomplete" {
+		typ = "response.incomplete"
+		resp["incomplete_details"] = map[string]any{"reason": incompleteReason(finish)}
+	}
+	return append(evs, respEvent(typ, map[string]any{"response": resp}))
 }
 
 func (s *chatToRespState) finish() []stream.Event {

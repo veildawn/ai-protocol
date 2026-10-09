@@ -77,6 +77,17 @@ func TestResponsesToChatTruncationIsNotACompletion(t *testing.T) {
 	}
 }
 
+func TestResponsesToMessagesIncompleteCloses(t *testing.T) {
+	src := responsesOpen + `data: {"type":"response.incomplete","response":{"id":"resp_1","model":"m","status":"incomplete","usage":{"input_tokens":3,"output_tokens":4}}}` + "\n\n"
+	out, res := pipeFor(t, Responses, Messages, src)
+	if !res.Terminal || res.Truncated {
+		t.Fatalf("result=%+v", res)
+	}
+	if !strings.Contains(out, `"stop_reason":"max_tokens"`) || !strings.Contains(out, "message_stop") {
+		t.Fatalf("ceiling cut not closed for the messages client:\n%s", out)
+	}
+}
+
 func TestResponsesToChatIncompleteIsLength(t *testing.T) {
 	src := responsesOpen + `data: {"type":"response.incomplete","response":{"id":"resp_1","model":"m","status":"incomplete","usage":{"input_tokens":3,"output_tokens":4}}}` + "\n\n"
 	out, res := pipeFor(t, Responses, Chat, src)
@@ -164,5 +175,80 @@ func TestChatSourceFoldsStillCloseAnOpenEndedStream(t *testing.T) {
 	}
 	if !strings.Contains(out, "message_stop") {
 		t.Fatalf("chat→messages lost its synthesized terminal:\n%s", out)
+	}
+}
+
+// A ceiling cut is a terminal, but it is NOT a completion: the Responses dialect
+// spells it response.incomplete and requires incomplete_details.reason. Emitting
+// response.completed with status "incomplete" and no reason is what left clients
+// reporting a bare "Response incomplete without a provider reason" — unable to
+// tell a max_output_tokens cut from a content filter, and reading the event name
+// as proof the turn finished.
+func TestChatToResponsesCeilingCutIsIncompleteWithReason(t *testing.T) {
+	src := chatOpen +
+		`data: {"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":10,"completion_tokens":65536,"total_tokens":65546}}` + "\n\n" +
+		relayDone
+	out, res := pipeFor(t, Chat, Responses, src)
+	if !res.Terminal || res.Truncated {
+		t.Fatalf("result=%+v", res)
+	}
+	if !strings.Contains(out, "event: response.incomplete") {
+		t.Fatalf("ceiling cut did not close as response.incomplete:\n%s", out)
+	}
+	if strings.Contains(out, "event: response.completed") {
+		t.Fatalf("ceiling cut was reported as a clean completion:\n%s", out)
+	}
+	if !strings.Contains(out, `"incomplete_details":{"reason":"max_output_tokens"}`) {
+		t.Fatalf("ceiling cut carried no reason:\n%s", out)
+	}
+}
+
+// The reason is what distinguishes the two non-success endings, so a content
+// filter must not be reported as a token ceiling.
+func TestChatToResponsesContentFilterKeepsItsOwnReason(t *testing.T) {
+	src := chatOpen +
+		`data: {"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"content_filter"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}` + "\n\n" +
+		relayDone
+	out, _ := pipeFor(t, Chat, Responses, src)
+	if !strings.Contains(out, "event: response.incomplete") {
+		t.Fatalf("content filter did not close as response.incomplete:\n%s", out)
+	}
+	if !strings.Contains(out, `"incomplete_details":{"reason":"content_filter"}`) {
+		t.Fatalf("content filter was mislabelled:\n%s", out)
+	}
+}
+
+// A clean finish must stay a clean completion, with no incomplete_details.
+func TestChatToResponsesCleanFinishStaysCompleted(t *testing.T) {
+	src := chatOpen +
+		`data: {"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}` + "\n\n" +
+		relayDone
+	out, res := pipeFor(t, Chat, Responses, src)
+	if !res.Terminal || res.Truncated {
+		t.Fatalf("result=%+v", res)
+	}
+	if !strings.Contains(out, "event: response.completed") {
+		t.Fatalf("clean finish did not close as response.completed:\n%s", out)
+	}
+	if strings.Contains(out, "response.incomplete") || strings.Contains(out, "incomplete_details") {
+		t.Fatalf("clean finish was marked incomplete:\n%s", out)
+	}
+}
+
+// The Messages dialect's ceiling cut is stop_reason max_tokens. It folds into
+// the same non-success terminal, for the same reason.
+func TestMessagesToResponsesCeilingCutIsIncompleteWithReason(t *testing.T) {
+	src := messagesOpen +
+		`event: message_delta` + "\n" + `data: {"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":65536}}` + "\n\n" +
+		messagesStop
+	out, res := pipeFor(t, Messages, Responses, src)
+	if !res.Terminal || res.Truncated {
+		t.Fatalf("result=%+v", res)
+	}
+	if !strings.Contains(out, "event: response.incomplete") {
+		t.Fatalf("max_tokens stop did not close as response.incomplete:\n%s", out)
+	}
+	if !strings.Contains(out, `"incomplete_details":{"reason":"max_output_tokens"}`) {
+		t.Fatalf("max_tokens stop carried no reason:\n%s", out)
 	}
 }

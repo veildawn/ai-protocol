@@ -19,17 +19,22 @@ func ChatResponseToResponses(body map[string]any) map[string]any {
 	if created == nil {
 		created = 0
 	}
-	return map[string]any{
+	status := finishToStatus(finish)
+	out := map[string]any{
 		"id":                  jsonx.GetString(body, "id"),
 		"created_at":          created,
 		"model":               jsonx.GetString(body, "model"),
 		"object":              "response",
 		"output":              output,
 		"parallel_tool_calls": false,
-		"status":              finishToStatus(finish),
+		"status":              status,
 		"text":                map[string]any{},
 		"usage":               chatUsageToResponses(body["usage"]),
 	}
+	if status == "incomplete" {
+		out["incomplete_details"] = map[string]any{"reason": incompleteReason(finish)}
+	}
+	return out
 }
 
 func ResponsesResponseToChat(body map[string]any) map[string]any {
@@ -169,15 +174,24 @@ func chatChoicesToResponsesOutput(choices []any) []any {
 	return out
 }
 
-func finishToStatus(fr string) string {
+// incompleteReason is the Responses incomplete_details.reason for a chat
+// finish_reason, or "" when that finish is a clean completion.
+func incompleteReason(fr string) string {
 	switch fr {
 	case "length":
-		return "incomplete"
-	case "tool_calls":
-		return "completed"
+		return "max_output_tokens"
+	case "content_filter":
+		return "content_filter"
 	default:
-		return "completed"
+		return ""
 	}
+}
+
+func finishToStatus(fr string) string {
+	if incompleteReason(fr) != "" {
+		return "incomplete"
+	}
+	return "completed"
 }
 
 func statusToFinish(status string, hasTools bool) string {

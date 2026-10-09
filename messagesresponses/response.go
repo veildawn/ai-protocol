@@ -57,7 +57,7 @@ func MessagesResponseToResponses(body map[string]any) map[string]any {
 		in, _ = jsonx.Int(um["input_tokens"])
 		out, _ = jsonx.Int(um["output_tokens"])
 	}
-	return map[string]any{
+	resp := map[string]any{
 		"id":     jsonx.GetString(body, "id"),
 		"object": "response",
 		"model":  jsonx.GetString(body, "model"),
@@ -69,4 +69,8 @@ func MessagesResponseToResponses(body map[string]any) map[string]any {
 			"total_tokens":  in + out,
 		},
 	}
+	if status == "incomplete" {
+		resp["incomplete_details"] = map[string]any{"reason": "max_output_tokens"}
+	}
+	return resp
 }

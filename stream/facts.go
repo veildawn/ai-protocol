@@ -234,6 +234,10 @@ func classifyResponsesEvent(typ string, obj map[string]json.RawMessage) EventFac
 	case "response.created", "response.in_progress", "response.queued", "response.metadata", "ping":
 		return EventFacts{Kind: EventPrelude}
 	case "response.completed":
+		// Some relays close a ceiling cut under this name with status incomplete.
+		if responsesStatus(obj) == "incomplete" {
+			return EventFacts{Kind: EventIncomplete}
+		}
 		return EventFacts{Kind: EventComplete}
 	case "response.incomplete":
 		return EventFacts{Kind: EventIncomplete}
@@ -257,6 +261,20 @@ func classifyResponsesEvent(typ string, obj map[string]json.RawMessage) EventFac
 	default:
 		return EventFacts{Kind: EventUnknown}
 	}
+}
+
+// responsesStatus reads the explicit response.status of a Responses terminal
+// event, or "" when the payload carries none. Both the top-level and the
+// nested response object are checked because relays differ on which they
+// populate.
+func responsesStatus(obj map[string]json.RawMessage) string {
+	if s := rawString(obj["status"]); s != "" {
+		return s
+	}
+	if resp := rawObject(obj["response"]); len(resp) > 0 {
+		return rawString(resp["status"])
+	}
+	return ""
 }
 
 func classifyResponsesPart(obj map[string]json.RawMessage) EventFacts {
