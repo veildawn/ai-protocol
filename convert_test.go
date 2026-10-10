@@ -616,3 +616,144 @@ func TestMessagesFoldRequiresMaxTokens(t *testing.T) {
 		t.Fatalf("responses->messages without fallback: err = %v", err)
 	}
 }
+
+func TestResponsesToChatMergesReasoningAndToolCalls(t *testing.T) {
+	// The shape DSH actually replays: the reasoning item carries its text under
+	// summary[].text (not a flat content string), and the function_call that
+	// belongs to the same turn follows it as its own input item.
+	in := jsonMap{
+		"model": "deepseek-v4.1-flash",
+		"input": []any{
+			map[string]any{"type": "message", "role": "user", "content": "hi"},
+			map[string]any{
+				"type":    "reasoning",
+				"id":      "rs_1",
+				"status":  "completed",
+				"summary": []any{map[string]any{"type": "summary_text", "text": "thinking about tools"}},
+			},
+			map[string]any{
+				"type":      "function_call",
+				"call_id":   "call_1",
+				"name":      "query",
+				"arguments": "{\"q\":\"abc\"}",
+			},
+			map[string]any{
+				"type":    "function_call_output",
+				"call_id": "call_1",
+				"output":  "result_1",
+			},
+		},
+	}
+	out := convertReq(t, Responses, Chat, in)
+	messages := out["messages"].([]any)
+	if len(messages) != 3 {
+		t.Fatalf("expected 3 messages (user, assistant, tool), got %d: %v", len(messages), messages)
+	}
+	assistant := messages[1].(map[string]any)
+	if assistant["role"] != "assistant" {
+		t.Fatalf("assistant role = %v", assistant["role"])
+	}
+	if assistant["reasoning_content"] != "thinking about tools" {
+		t.Fatalf("reasoning_content = %v", assistant["reasoning_content"])
+	}
+	toolCalls, ok := assistant["tool_calls"].([]any)
+	if !ok || len(toolCalls) != 1 {
+		t.Fatalf("tool_calls = %v", assistant["tool_calls"])
+	}
+	call := toolCalls[0].(map[string]any)
+	if call["id"] != "call_1" {
+		t.Fatalf("call_id = %v", call["id"])
+	}
+}
+
+func TestResponsesToChatJoinsMultipleReasoningItems(t *testing.T) {
+	// Two reasoning items in one turn must land on ONE assistant message: a
+	// second one that opened its own message would strand the first with no
+	// tool_calls, which is the shape the upstream rejects.
+	in := jsonMap{
+		"model": "deepseek-v4.1-flash",
+		"input": []any{
+			map[string]any{"type": "message", "role": "user", "content": "hi"},
+			map[string]any{"type": "reasoning", "content": "first thought"},
+			map[string]any{"type": "reasoning", "content": "second thought"},
+			map[string]any{
+				"type":      "function_call",
+				"call_id":   "call_1",
+				"name":      "query",
+				"arguments": "{}",
+			},
+		},
+	}
+	out := convertReq(t, Responses, Chat, in)
+	messages := out["messages"].([]any)
+	if len(messages) != 2 {
+		t.Fatalf("expected user + one assistant message, got %d: %v", len(messages), messages)
+	}
+	assistant := messages[1].(map[string]any)
+	if assistant["reasoning_content"] != "first thought\nsecond thought" {
+		t.Fatalf("reasoning_content = %v", assistant["reasoning_content"])
+	}
+	if calls, ok := assistant["tool_calls"].([]any); !ok || len(calls) != 1 {
+		t.Fatalf("tool_calls = %v", assistant["tool_calls"])
+	}
+}
+
+func TestResponsesToChatKeepsDistinctAssistantText(t *testing.T) {
+	// Two assistant messages that both carry text are two turns. Folding the
+	// second into the first would silently drop its content.
+	in := jsonMap{
+		"model": "m",
+		"input": []any{
+			map[string]any{"type": "message", "role": "user", "content": "hi"},
+			map[string]any{"type": "message", "role": "assistant", "content": "first answer"},
+			map[string]any{"type": "message", "role": "user", "content": "again"},
+			map[string]any{"type": "message", "role": "assistant", "content": "second answer"},
+		},
+	}
+	out := convertReq(t, Responses, Chat, in)
+	messages := out["messages"].([]any)
+	if len(messages) != 4 {
+		t.Fatalf("expected 4 messages, got %d: %v", len(messages), messages)
+	}
+	if messages[1].(map[string]any)["content"] != "first answer" {
+		t.Fatalf("first assistant = %v", messages[1])
+	}
+	if messages[3].(map[string]any)["content"] != "second answer" {
+		t.Fatalf("second assistant = %v", messages[3])
+	}
+}
+
+func TestResponsesToChatKeepsTurnsSeparatedByUser(t *testing.T) {
+	// A user message ends a turn: the next reasoning item belongs to the NEXT
+	// assistant message, not to the one before the user.
+	in := jsonMap{
+		"model": "m",
+		"input": []any{
+			map[string]any{"type": "message", "role": "user", "content": "one"},
+			map[string]any{"type": "message", "role": "assistant", "content": "answer one"},
+			map[string]any{"type": "message", "role": "user", "content": "two"},
+			map[string]any{"type": "reasoning", "content": "second turn thought"},
+			map[string]any{
+				"type":      "function_call",
+				"call_id":   "call_2",
+				"name":      "query",
+				"arguments": "{}",
+			},
+		},
+	}
+	out := convertReq(t, Responses, Chat, in)
+	messages := out["messages"].([]any)
+	if len(messages) != 4 {
+		t.Fatalf("expected 4 messages, got %d: %v", len(messages), messages)
+	}
+	if _, carried := messages[1].(map[string]any)["reasoning_content"]; carried {
+		t.Fatalf("first assistant must not absorb the next turn's reasoning: %v", messages[1])
+	}
+	last := messages[3].(map[string]any)
+	if last["reasoning_content"] != "second turn thought" {
+		t.Fatalf("last assistant reasoning = %v", last["reasoning_content"])
+	}
+	if calls, ok := last["tool_calls"].([]any); !ok || len(calls) != 1 {
+		t.Fatalf("last assistant tool_calls = %v", last["tool_calls"])
+	}
+}

@@ -259,20 +259,41 @@ func responsesInputToChatMessages(input any) ([]any, []string) {
 				"content":      jsonx.GetString(m, "output"),
 			})
 		case "function_call":
+			call := map[string]any{
+				"id":   jsonx.GetString(m, "call_id"),
+				"type": "function",
+				"function": map[string]any{
+					"name":      jsonx.GetString(m, "name"),
+					"arguments": jsonx.GetString(m, "arguments"),
+				},
+			}
+			// The call belongs to the assistant turn it was emitted in. Folding
+			// it into a separate assistant message splits one turn in two, and
+			// a strict upstream rejects a replayed turn whose reasoning and
+			// tool_calls are not carried by the same assistant message.
+			if last, ok := lastAssistant(msgs); ok {
+				if existing, ok := jsonx.AsSlice(last["tool_calls"]); ok {
+					last["tool_calls"] = append(existing, call)
+				} else {
+					last["tool_calls"] = []any{call}
+				}
+				continue
+			}
 			msgs = append(msgs, map[string]any{
-				"role": "assistant",
-				"tool_calls": []any{map[string]any{
-					"id":   jsonx.GetString(m, "call_id"),
-					"type": "function",
-					"function": map[string]any{
-						"name":      jsonx.GetString(m, "name"),
-						"arguments": jsonx.GetString(m, "arguments"),
-					},
-				}},
+				"role":       "assistant",
+				"tool_calls": []any{call},
 			})
 		case "reasoning":
 			text := reasoningText(m)
 			if text != "" {
+				// Join the reasoning onto the adjacent assistant turn instead of
+				// opening one of its own. A second reasoning item appends rather
+				// than splitting the turn, which would strand the first item on
+				// a message with no tool_calls of its own.
+				if last, ok := lastAssistant(msgs); ok {
+					last["reasoning_content"] = joinReasoning(jsonx.GetString(last, "reasoning_content"), text)
+					continue
+				}
 				msgs = append(msgs, map[string]any{
 					"role":              "assistant",
 					"content":           nil,
@@ -289,12 +310,47 @@ func responsesInputToChatMessages(input any) ([]any, []string) {
 				continue
 			}
 			content, images := partsToChatContent(m["content"], role)
-			msg := map[string]any{"role": role, "content": content}
 			_ = images
+			// An assistant message whose text was split from its own reasoning
+			// rejoins it. Only a message the previous turn left EMPTY is
+			// absorbed: a second message with text of its own is a distinct
+			// turn and dropping it would lose content.
+			if role == "assistant" {
+				if last, ok := lastAssistant(msgs); ok {
+					if last["content"] == nil || last["content"] == "" {
+						last["content"] = content
+						continue
+					}
+				}
+			}
+			msg := map[string]any{"role": role, "content": content}
 			msgs = append(msgs, msg)
 		}
 	}
 	return msgs, instructions
+}
+
+// lastAssistant reports the trailing message when it is an assistant message —
+// the message a following function_call, reasoning item or split text belongs to.
+func lastAssistant(msgs []any) (map[string]any, bool) {
+	if len(msgs) == 0 {
+		return nil, false
+	}
+	last, ok := msgs[len(msgs)-1].(map[string]any)
+	if !ok || jsonx.GetString(last, "role") != "assistant" {
+		return nil, false
+	}
+	return last, true
+}
+
+// joinReasoning appends a later reasoning item to the text already carried, so
+// several items in one turn read as one block rather than being concatenated
+// without a separator.
+func joinReasoning(prev, next string) string {
+	if strings.TrimSpace(prev) == "" {
+		return next
+	}
+	return prev + "\n" + next
 }
 
 func partsToChatContent(content any, role string) (any, bool) {
