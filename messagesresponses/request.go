@@ -105,8 +105,14 @@ func ResponsesToMessages(body map[string]any) (map[string]any, error) {
 					if !ok {
 						continue
 					}
-					if jsonx.GetString(pm, "type") == "output_text" {
+					switch jsonx.GetString(pm, "type") {
+					case "output_text":
 						content = append(content, map[string]any{"type": "text", "text": jsonx.GetString(pm, "text")})
+					case "refusal":
+						// A refusal is the model's answer, carried in its own
+						// field; dropping it would leave the turn with no text
+						// at all, as if the model had said nothing.
+						content = append(content, map[string]any{"type": "text", "text": jsonx.GetString(pm, "refusal")})
 					}
 				}
 			}

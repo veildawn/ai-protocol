@@ -60,8 +60,14 @@ func MessagesResponseToResponses(body map[string]any) map[string]any {
 		output = []any{}
 	}
 	status := "completed"
-	if jsonx.GetString(body, "stop_reason") == "max_tokens" {
-		status = "incomplete"
+	incomplete := ""
+	switch jsonx.GetString(body, "stop_reason") {
+	case "max_tokens":
+		status, incomplete = "incomplete", "max_output_tokens"
+	case "refusal":
+		// A safeguard refusal is not a clean stop; the Responses spelling for
+		// it is a content filter, matching the chat direction.
+		status, incomplete = "incomplete", "content_filter"
 	}
 	usage := body["usage"]
 	in, out := 0, 0
@@ -82,7 +88,7 @@ func MessagesResponseToResponses(body map[string]any) map[string]any {
 		},
 	}
 	if status == "incomplete" {
-		resp["incomplete_details"] = map[string]any{"reason": "max_output_tokens"}
+		resp["incomplete_details"] = map[string]any{"reason": incomplete}
 	}
 	return resp
 }

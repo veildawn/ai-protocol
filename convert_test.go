@@ -1105,3 +1105,46 @@ func TestChatResponsesRefusalAndIncompleteReason(t *testing.T) {
 		t.Fatalf("finish_reason = %v, want content_filter", got)
 	}
 }
+
+// A Responses refusal part carries the model's answer in `refusal`, not `text`.
+// Dropping it leaves the turn with no content at all.
+func TestResponsesToMessagesKeepsRefusalText(t *testing.T) {
+	body := `{"id":"r1","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"refusal","refusal":"I can't help with that."}]}]}`
+	out, err := ConvertResponse(Responses, Messages, []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatal(err)
+	}
+	content := m["content"].([]any)
+	if len(content) != 1 {
+		t.Fatalf("content = %#v, want the refusal as text", content)
+	}
+	block := content[0].(map[string]any)
+	if block["type"] != "text" || block["text"] != "I can't help with that." {
+		t.Fatalf("block = %#v", block)
+	}
+}
+
+// A Messages safeguard refusal (stop_reason "refusal") is not a clean stop;
+// the Responses spelling for it is a content filter.
+func TestMessagesResponseRefusalStopReason(t *testing.T) {
+	body := `{"id":"m1","type":"message","role":"assistant","stop_reason":"refusal","content":[{"type":"text","text":"no"}]}`
+	out, err := ConvertResponse(Messages, Responses, []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["status"] != "incomplete" {
+		t.Fatalf("status = %v, want incomplete", m["status"])
+	}
+	details, _ := m["incomplete_details"].(map[string]any)
+	if details["reason"] != "content_filter" {
+		t.Fatalf("reason = %#v, want content_filter", m["incomplete_details"])
+	}
+}
