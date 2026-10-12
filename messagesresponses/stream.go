@@ -503,6 +503,24 @@ func (s *respToMsg) feed(event string, obj map[string]any) []stream.Event {
 			"type": "content_block_delta", "index": s.blockIndex,
 			"delta": map[string]any{"type": "thinking_delta", "thinking": jsonx.String(obj["delta"])},
 		})})
+	case "response.output_item.done":
+		// A reasoning item's opaque bytes arrive only here. They ride a
+		// signature_delta on the thinking block — before it closes, since a
+		// signature cannot follow content_block_stop — so the client can
+		// replay the block on the next turn. Dropping them makes the turn
+		// unreplayable against a target that requires a signed block.
+		item, _ := jsonx.AsMap(obj["item"])
+		if item == nil || jsonx.GetString(item, "type") != "reasoning" {
+			break
+		}
+		sig := jsonx.GetString(item, "encrypted_content")
+		if sig == "" || !s.blockOpen || s.blockType != "thinking" {
+			break
+		}
+		evs = append(evs, stream.Event{Event: "content_block_delta", Data: mustJSON(map[string]any{
+			"type": "content_block_delta", "index": s.blockIndex,
+			"delta": map[string]any{"type": "signature_delta", "signature": sig},
+		})})
 	case "response.completed", "response.incomplete":
 		evs = append(evs, s.close()...)
 		stop := "end_turn"

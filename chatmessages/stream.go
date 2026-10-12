@@ -195,7 +195,10 @@ func (s *chatToMsgState) feedChatChunk(obj map[string]any) []stream.Event {
 			}
 		}
 	}
-	if fr := jsonx.GetString(ch, "finish_reason"); fr != "" {
+	// A relay may repeat finish_reason on a trailing usage-only chunk. The
+	// terminal frames go out once: a second message_stop is a protocol
+	// violation a client reading the stream cannot reconcile.
+	if fr := jsonx.GetString(ch, "finish_reason"); fr != "" && !s.closed {
 		evs = append(evs, s.closeBlock()...)
 		// The terminal usage is cumulative and carries both halves, and an
 		// Anthropic client reads input tokens from here — reporting only

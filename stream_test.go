@@ -707,3 +707,74 @@ func TestPipeChatToMessagesKeepsInputTokens(t *testing.T) {
 		t.Fatalf("cache_read_input_tokens = %v, want 3 (usage=%v)", usage["cache_read_input_tokens"], usage)
 	}
 }
+
+// A relay that repeats finish_reason on a trailing usage-only chunk must not
+// produce a second message_stop: a client reading the stream cannot reconcile
+// two terminators.
+func TestPipeChatToMessagesTerminatesOnce(t *testing.T) {
+	src := strings.Join([]string{
+		`data: {"id":"c1","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"}}]}`,
+		``,
+		`data: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		``,
+		`data: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2}}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	var dst bytes.Buffer
+	if _, err := PipeStream(Chat, Messages, &dst, strings.NewReader(src), StreamOpts{Model: "m"}); err != nil {
+		t.Fatal(err)
+	}
+	stops := 0
+	for _, e := range responseEvents(t, dst.String()) {
+		if e["type"] == "message_stop" {
+			stops++
+		}
+	}
+	if stops != 1 {
+		t.Fatalf("message_stop count = %d, want 1\n%s", stops, dst.String())
+	}
+}
+
+// A reasoning item's opaque bytes arrive only on output_item.done, and must
+// ride a signature_delta before the thinking block closes — a signature cannot
+// follow content_block_stop. Without it the block cannot be replayed.
+func TestPipeResponsesToMessagesEmitsSignatureDelta(t *testing.T) {
+	src := strings.Join([]string{
+		`data: {"type":"response.created","response":{"id":"r1","model":"m"}}`,
+		``,
+		`data: {"type":"response.reasoning_summary_text.delta","output_index":0,"delta":"thinking..."}`,
+		``,
+		`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","encrypted_content":"OPAQUE"}}`,
+		``,
+		`data: {"type":"response.completed","response":{"id":"r1","status":"completed","output":[]}}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	var dst bytes.Buffer
+	if _, err := PipeStream(Responses, Messages, &dst, strings.NewReader(src), StreamOpts{Model: "m"}); err != nil {
+		t.Fatal(err)
+	}
+	sigAt, stopAt := -1, -1
+	for i, e := range responseEvents(t, dst.String()) {
+		switch e["type"] {
+		case "content_block_delta":
+			if d, ok := e["delta"].(map[string]any); ok && d["type"] == "signature_delta" {
+				sigAt = i
+				if d["signature"] != "OPAQUE" {
+					t.Fatalf("signature = %v, want OPAQUE", d["signature"])
+				}
+			}
+		case "content_block_stop":
+			stopAt = i
+		}
+	}
+	if sigAt < 0 {
+		t.Fatalf("no signature_delta:\n%s", dst.String())
+	}
+	if stopAt >= 0 && sigAt > stopAt {
+		t.Fatalf("signature_delta must precede content_block_stop:\n%s", dst.String())
+	}
+}
