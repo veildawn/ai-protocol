@@ -1070,3 +1070,38 @@ func TestMessagesToResponsesToolResultMedia(t *testing.T) {
 		t.Fatalf("image part = %#v", imgPart)
 	}
 }
+
+// A refusal is the model declining, not a clean stop: it must not be reported
+// as a completed turn, and the reverse fold must keep a content_filter cut
+// distinct from a length cut.
+func TestChatResponsesRefusalAndIncompleteReason(t *testing.T) {
+	chatBody := `{"id":"c1","choices":[{"message":{"role":"assistant","content":null},"finish_reason":"refusal"}]}`
+	out, err := ConvertResponse(Chat, Responses, []byte(chatBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["status"] != "incomplete" {
+		t.Fatalf("refusal status = %v, want incomplete", m["status"])
+	}
+	details, _ := m["incomplete_details"].(map[string]any)
+	if details["reason"] != "content_filter" {
+		t.Fatalf("refusal reason = %#v", m["incomplete_details"])
+	}
+
+	back, err := ConvertResponse(Responses, Chat, []byte(`{"id":"r1","status":"incomplete","output":[],"incomplete_details":{"reason":"content_filter"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b map[string]any
+	if err := json.Unmarshal(back, &b); err != nil {
+		t.Fatal(err)
+	}
+	choices := b["choices"].([]any)
+	if got := choices[0].(map[string]any)["finish_reason"]; got != "content_filter" {
+		t.Fatalf("finish_reason = %v, want content_filter", got)
+	}
+}

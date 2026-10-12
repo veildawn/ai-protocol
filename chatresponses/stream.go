@@ -494,7 +494,13 @@ func (s *respToChatState) feed(event string, obj map[string]any) []stream.Event 
 				status = got
 			}
 		}
-		finish := statusToFinish(status, false)
+		detailReason := ""
+		if resp != nil {
+			if d, ok := jsonx.AsMap(resp["incomplete_details"]); ok {
+				detailReason = jsonx.GetString(d, "reason")
+			}
+		}
+		finish := statusToFinish(status, false, detailReason)
 		if resp != nil {
 			if out, ok := jsonx.AsSlice(resp["output"]); ok {
 				for _, it := range out {

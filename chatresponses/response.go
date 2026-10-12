@@ -83,7 +83,11 @@ func ResponsesResponseToChat(body map[string]any) map[string]any {
 	if reasoning != "" {
 		msg["reasoning_content"] = reasoning
 	}
-	finish := statusToFinish(jsonx.GetString(body, "status"), len(toolCalls) > 0)
+	detailReason := ""
+	if d, ok := jsonx.AsMap(body["incomplete_details"]); ok {
+		detailReason = jsonx.GetString(d, "reason")
+	}
+	finish := statusToFinish(jsonx.GetString(body, "status"), len(toolCalls) > 0, detailReason)
 	id := jsonx.GetString(body, "id")
 	created := body["created_at"]
 	if created == nil {
@@ -201,6 +205,10 @@ func incompleteReason(fr string) string {
 		return "max_output_tokens"
 	case "content_filter":
 		return "content_filter"
+	case "refusal":
+		// A refusal is the model declining, not a clean stop; reporting it as
+		// completed would tell the client the turn finished normally.
+		return "content_filter"
 	default:
 		return ""
 	}
@@ -213,11 +221,18 @@ func finishToStatus(fr string) string {
 	return "completed"
 }
 
-func statusToFinish(status string, hasTools bool) string {
+// statusToFinish maps a Responses status onto a chat finish_reason. An
+// incomplete turn keeps its reason: a length cut and a content filter are
+// different outcomes, and reporting both as "length" tells a client the model
+// ran out of room when it actually declined.
+func statusToFinish(status string, hasTools bool, incompleteReason string) string {
 	if hasTools {
 		return "tool_calls"
 	}
 	if status == "incomplete" {
+		if incompleteReason == "content_filter" {
+			return "content_filter"
+		}
 		return "length"
 	}
 	return "stop"
