@@ -16,6 +16,18 @@ func MessagesResponseToResponses(body map[string]any) map[string]any {
 		}
 		switch jsonx.GetString(bm, "type") {
 		case "thinking", "redacted_thinking":
+			// A redacted block carries its payload in `data` and has no
+			// summary text; reading only `signature` would emit an empty
+			// reasoning item and lose the opaque bytes the next turn replays.
+			// Mirrors the streaming path.
+			if jsonx.GetString(bm, "type") == "redacted_thinking" {
+				item := map[string]any{"type": "reasoning", "summary": []any{}}
+				if data := jsonx.GetString(bm, "data"); data != "" {
+					item["encrypted_content"] = data
+				}
+				output = append(output, item)
+				continue
+			}
 			text := jsonx.GetString(bm, "thinking")
 			item := map[string]any{
 				"type":    "reasoning",

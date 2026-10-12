@@ -671,3 +671,39 @@ func TestPipeResponsesToMessagesToolBlockStartsAtZero(t *testing.T) {
 		t.Fatalf("content_block_start indices = %v, want [0]\n%s", starts, dst.String())
 	}
 }
+
+// The terminal message_delta carries cumulative usage, and an Anthropic client
+// reads input tokens from it. Reporting only output_tokens drops the prompt
+// count and the cache split.
+func TestPipeChatToMessagesKeepsInputTokens(t *testing.T) {
+	src := strings.Join([]string{
+		`data: {"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"}}]}`,
+		``,
+		`data: {"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":3}}}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	var dst bytes.Buffer
+	if _, err := PipeStream(Chat, Messages, &dst, strings.NewReader(src), StreamOpts{Model: "m"}); err != nil {
+		t.Fatal(err)
+	}
+	var usage map[string]any
+	for _, e := range responseEvents(t, dst.String()) {
+		if e["type"] == "message_delta" {
+			usage, _ = e["usage"].(map[string]any)
+		}
+	}
+	if usage == nil {
+		t.Fatalf("no message_delta usage:\n%s", dst.String())
+	}
+	if in, _ := usage["input_tokens"].(float64); in != 10 {
+		t.Fatalf("input_tokens = %v, want 10 (usage=%v)", usage["input_tokens"], usage)
+	}
+	if out, _ := usage["output_tokens"].(float64); out != 5 {
+		t.Fatalf("output_tokens = %v, want 5", usage["output_tokens"])
+	}
+	if c, _ := usage["cache_read_input_tokens"].(float64); c != 3 {
+		t.Fatalf("cache_read_input_tokens = %v, want 3 (usage=%v)", usage["cache_read_input_tokens"], usage)
+	}
+}

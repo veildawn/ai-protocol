@@ -197,11 +197,15 @@ func (s *chatToMsgState) feedChatChunk(obj map[string]any) []stream.Event {
 	}
 	if fr := jsonx.GetString(ch, "finish_reason"); fr != "" {
 		evs = append(evs, s.closeBlock()...)
+		// The terminal usage is cumulative and carries both halves, and an
+		// Anthropic client reads input tokens from here — reporting only
+		// output_tokens drops the prompt count (and the cache split) entirely,
+		// since message_start could not know them yet.
 		usage := openaiUsageToAnthropic(obj["usage"])
 		evs = append(evs, stream.Event{Event: "message_delta", Data: mustJSON(map[string]any{
 			"type":  "message_delta",
 			"delta": map[string]any{"stop_reason": finishToStopReason(fr), "stop_sequence": nil},
-			"usage": map[string]any{"output_tokens": usage["output_tokens"]},
+			"usage": usage,
 		})})
 		evs = append(evs, stream.Event{Event: "message_stop", Data: mustJSON(map[string]any{"type": "message_stop"})})
 		s.closed = true

@@ -929,3 +929,28 @@ func TestMessagesToChatUserDocumentKept(t *testing.T) {
 		t.Fatalf("url = %v", got)
 	}
 }
+
+// A redacted_thinking block carries its payload in `data`, not `signature`.
+// The non-streaming response fold used to read only `signature`, emitting an
+// empty reasoning item and losing the opaque bytes the next turn replays.
+func TestMessagesResponseToResponsesRedactedThinkingKeepsData(t *testing.T) {
+	body := `{"id":"m1","type":"message","role":"assistant","content":[{"type":"redacted_thinking","data":"OPAQUE"}]}`
+	out, err := ConvertResponse(Messages, Responses, []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatal(err)
+	}
+	item := m["output"].([]any)[0].(map[string]any)
+	if item["type"] != "reasoning" {
+		t.Fatalf("item = %#v", item)
+	}
+	if item["encrypted_content"] != "OPAQUE" {
+		t.Fatalf("encrypted_content = %v, want OPAQUE", item["encrypted_content"])
+	}
+	if s, _ := item["summary"].([]any); len(s) != 0 {
+		t.Fatalf("redacted block should carry no summary text: %#v", s)
+	}
+}
