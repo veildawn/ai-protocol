@@ -1016,3 +1016,57 @@ func TestMessagesToResponsesToolStatesStrict(t *testing.T) {
 		t.Fatalf("strict tool strict = %#v, want true", tools[1].(map[string]any)["strict"])
 	}
 }
+
+// A tool_result that returned an image or a document must not lose it when the
+// turn is folded onto Responses. The output field takes text and file parts;
+// an image rides a following user message instead.
+func TestMessagesToResponsesToolResultMedia(t *testing.T) {
+	in := jsonMap{
+		"model": "m",
+		"messages": []any{
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "tool_result", "tool_use_id": "t1", "content": []any{
+					map[string]any{"type": "text", "text": "see"},
+					map[string]any{"type": "image", "source": map[string]any{
+						"type": "base64", "media_type": "image/png", "data": "AA",
+					}},
+					map[string]any{"type": "document", "source": map[string]any{
+						"type": "base64", "media_type": "application/pdf", "data": "JVBE",
+					}},
+				}},
+			}},
+		},
+	}
+	out := convertReq(t, Messages, Responses, in)
+	input := out["input"].([]any)
+	call := input[0].(map[string]any)
+	if call["type"] != "function_call_output" {
+		t.Fatalf("first item = %#v", call)
+	}
+	parts, ok := call["output"].([]any)
+	if !ok {
+		t.Fatalf("output = %#v, want a part list carrying the file", call["output"])
+	}
+	var sawText, sawFile bool
+	for _, p := range parts {
+		pm, _ := p.(map[string]any)
+		switch pm["type"] {
+		case "input_text":
+			sawText = pm["text"] == "see"
+		case "input_file":
+			sawFile = true
+		}
+	}
+	if !sawText || !sawFile {
+		t.Fatalf("output parts = %#v, want the text and the document", parts)
+	}
+	// The image cannot ride the output, so it is re-attached as a user turn.
+	imgMsg := input[1].(map[string]any)
+	if imgMsg["role"] != "user" {
+		t.Fatalf("second item = %#v, want a user message", imgMsg)
+	}
+	imgPart := imgMsg["content"].([]any)[0].(map[string]any)
+	if imgPart["type"] != "input_image" || imgPart["image_url"] != "data:image/png;base64,AA" {
+		t.Fatalf("image part = %#v", imgPart)
+	}
+}

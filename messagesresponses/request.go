@@ -164,6 +164,10 @@ func first(a, b string) string {
 
 func messagesToInput(msgs []any) []any {
 	var input []any
+	// Images lifted out of tool results, re-attached after the turns they
+	// belong to — a function_call_output carries text and file parts, not
+	// images.
+	var toolImages []any
 	for _, item := range msgs {
 		m, ok := jsonx.AsMap(item)
 		if !ok {
@@ -210,11 +214,17 @@ func messagesToInput(msgs []any) []any {
 						userParts = append(userParts, fp)
 					}
 				case "tool_result":
+					// A tool result carries more than text: an image rides a
+					// placeholder here and is re-attached as a following user
+					// message, and a document becomes a file part on the
+					// output. Dropping either loses what the tool returned.
+					output, images := toolResultOutput(bm["content"])
 					input = append(input, map[string]any{
 						"type":    "function_call_output",
 						"call_id": jsonx.GetString(bm, "tool_use_id"),
-						"output":  toolResultOutput(bm["content"]),
+						"output":  output,
 					})
+					toolImages = append(toolImages, images...)
 				}
 			}
 			if len(userParts) > 0 {
@@ -275,6 +285,13 @@ func messagesToInput(msgs []any) []any {
 			}
 			flushText()
 		}
+	}
+	if len(toolImages) > 0 {
+		input = append(input, map[string]any{
+			"type":    "message",
+			"role":    "user",
+			"content": toolImages,
+		})
 	}
 	return input
 }
@@ -351,22 +368,49 @@ func documentFilePart(bm map[string]any) map[string]any {
 	return nil
 }
 
-func toolResultOutput(content any) string {
+// toolResultOutput renders one Anthropic tool_result for a Responses
+// function_call_output, whose `output` is text or a part list. Documents ride
+// the output as file parts; images cannot (the field takes text and files
+// only), so they come back separately for the caller to re-attach.
+func toolResultOutput(content any) (any, []any) {
 	switch c := content.(type) {
 	case string:
-		return c
+		return c, nil
 	case []any:
-		var parts []string
+		var texts []string
+		var fileParts []any
+		var images []any
 		for _, p := range c {
-			if pm, ok := jsonx.AsMap(p); ok && jsonx.GetString(pm, "type") == "text" {
-				parts = append(parts, jsonx.GetString(pm, "text"))
+			pm, ok := jsonx.AsMap(p)
+			if !ok {
+				continue
+			}
+			switch jsonx.GetString(pm, "type") {
+			case "text":
+				texts = append(texts, jsonx.GetString(pm, "text"))
+			case "document":
+				if fp := documentFilePart(pm); fp != nil {
+					fileParts = append(fileParts, fp)
+				}
+			case "image":
+				if url := imageURL(pm); url != "" {
+					images = append(images, map[string]any{"type": "input_image", "image_url": url})
+				}
 			}
 		}
-		return strings.Join(parts, "\n")
+		if len(fileParts) == 0 {
+			return strings.Join(texts, "\n"), images
+		}
+		var parts []any
+		if joined := strings.Join(texts, "\n"); joined != "" {
+			parts = append(parts, map[string]any{"type": "input_text", "text": joined})
+		}
+		parts = append(parts, fileParts...)
+		return parts, images
 	case nil:
-		return ""
+		return "", nil
 	default:
-		return jsonx.String(c)
+		return jsonx.String(c), nil
 	}
 }
 
