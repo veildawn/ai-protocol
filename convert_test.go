@@ -954,3 +954,65 @@ func TestMessagesResponseToResponsesRedactedThinkingKeepsData(t *testing.T) {
 		t.Fatalf("redacted block should carry no summary text: %#v", s)
 	}
 }
+
+// A document attached to a user message becomes a Responses input_file. The
+// bytes ride a data URL and the part carries a filename; `media_type` is not a
+// field of input_file, and a URL source is a different field again.
+func TestMessagesToResponsesDocumentFilePart(t *testing.T) {
+	in := jsonMap{
+		"model": "m",
+		"messages": []any{
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "document", "source": map[string]any{
+					"type": "base64", "media_type": "application/pdf", "data": "JVBE",
+				}},
+			}},
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "document", "source": map[string]any{
+					"type": "url", "url": "https://x/a.pdf",
+				}},
+			}},
+		},
+	}
+	out := convertReq(t, Messages, Responses, in)
+	input := out["input"].([]any)
+	part := input[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+	if part["type"] != "input_file" {
+		t.Fatalf("part = %#v", part)
+	}
+	if part["file_data"] != "data:application/pdf;base64,JVBE" {
+		t.Fatalf("file_data = %v", part["file_data"])
+	}
+	if part["filename"] != "document.pdf" {
+		t.Fatalf("filename = %v", part["filename"])
+	}
+	if _, bad := part["media_type"]; bad {
+		t.Fatalf("input_file has no media_type field: %#v", part)
+	}
+	urlPart := input[1].(map[string]any)["content"].([]any)[0].(map[string]any)
+	if urlPart["file_url"] != "https://x/a.pdf" {
+		t.Fatalf("url document = %#v", urlPart)
+	}
+}
+
+// Responses turns strict mode on when a function tool omits `strict`, silently
+// rewriting `required` to every property. An Anthropic tool is non-strict
+// unless it asked otherwise, so the fold must state the flag.
+func TestMessagesToResponsesToolStatesStrict(t *testing.T) {
+	in := jsonMap{
+		"model":    "m",
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+		"tools": []any{
+			map[string]any{"name": "plain", "input_schema": map[string]any{"type": "object"}},
+			map[string]any{"name": "strict_one", "strict": true, "input_schema": map[string]any{"type": "object"}},
+		},
+	}
+	out := convertReq(t, Messages, Responses, in)
+	tools := out["tools"].([]any)
+	if got, ok := tools[0].(map[string]any)["strict"].(bool); !ok || got {
+		t.Fatalf("plain tool strict = %#v, want false", tools[0].(map[string]any)["strict"])
+	}
+	if got, ok := tools[1].(map[string]any)["strict"].(bool); !ok || !got {
+		t.Fatalf("strict tool strict = %#v, want true", tools[1].(map[string]any)["strict"])
+	}
+}

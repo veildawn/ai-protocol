@@ -319,14 +319,36 @@ func documentFilePart(bm map[string]any) map[string]any {
 	if !ok {
 		return nil
 	}
-	part := map[string]any{"type": "input_file"}
-	if jsonx.GetString(src, "type") == "base64" {
-		part["file_data"] = jsonx.GetString(src, "data")
-		if mt := jsonx.GetString(src, "media_type"); mt != "" {
-			part["media_type"] = mt
+	switch jsonx.GetString(src, "type") {
+	case "base64":
+		data := jsonx.GetString(src, "data")
+		if data == "" {
+			return nil
 		}
+		media := jsonx.GetString(src, "media_type")
+		if media == "" {
+			media = "application/pdf"
+		}
+		filename := jsonx.GetString(bm, "title")
+		if filename == "" {
+			filename = "document.pdf"
+		}
+		// Responses input_file takes the bytes as a data URL plus a filename;
+		// `media_type` is not a field of this part, and raw base64 without the
+		// data: prefix is not what the upstream reads.
+		return map[string]any{
+			"type":      "input_file",
+			"filename":  filename,
+			"file_data": "data:" + media + ";base64," + data,
+		}
+	case "url":
+		url := jsonx.GetString(src, "url")
+		if url == "" {
+			return nil
+		}
+		return map[string]any{"type": "input_file", "file_url": url}
 	}
-	return part
+	return nil
 }
 
 func toolResultOutput(content any) string {
@@ -364,7 +386,16 @@ func toolsToResponses(v any) []any {
 			out = append(out, map[string]any{"type": "web_search_preview"})
 			continue
 		}
-		tool := map[string]any{"type": "function", "name": jsonx.GetString(m, "name")}
+		strict, _ := jsonx.Bool(m["strict"])
+		tool := map[string]any{
+			"type": "function",
+			"name": jsonx.GetString(m, "name"),
+			// Responses defaults to strict mode when this is absent, silently
+			// rewriting `required` to every property. An Anthropic tool is
+			// non-strict unless it asked otherwise, so the flag is stated
+			// rather than left to the target's default.
+			"strict": strict,
+		}
 		if d := jsonx.GetString(m, "description"); d != "" {
 			tool["description"] = d
 		}
