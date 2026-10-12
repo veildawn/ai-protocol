@@ -757,3 +757,175 @@ func TestResponsesToChatKeepsTurnsSeparatedByUser(t *testing.T) {
 		t.Fatalf("last assistant tool_calls = %v", last["tool_calls"])
 	}
 }
+
+// A tool_result that returned an image must reach a chat upstream as a content
+// part, not as the Anthropic image block. The chat vocabulary has no "image"
+// content type, so forwarding it verbatim makes an upstream that parses that
+// vocabulary reject the whole request — and the tool result stays in history,
+// so every later request fails too.
+func TestMessagesToChatToolResultImage(t *testing.T) {
+	in := jsonMap{
+		"model": "m",
+		"messages": []any{
+			map[string]any{
+				"role": "assistant",
+				"content": []any{
+					map[string]any{"type": "tool_use", "id": "t1", "name": "read", "input": map[string]any{}},
+				},
+			},
+			map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "tool_result", "tool_use_id": "t1", "content": []any{
+						map[string]any{"type": "image", "source": map[string]any{
+							"type": "base64", "media_type": "image/png", "data": "QUJD",
+						}},
+					}},
+				},
+			},
+		},
+	}
+	out := convertReq(t, Messages, Chat, in)
+	tool := out["messages"].([]any)[1].(map[string]any)
+	if tool["role"] != "tool" {
+		t.Fatalf("role = %v, want tool", tool["role"])
+	}
+	parts, ok := tool["content"].([]any)
+	if !ok {
+		t.Fatalf("content = %#v, want a content-part array", tool["content"])
+	}
+	if len(parts) != 1 {
+		t.Fatalf("parts = %#v", parts)
+	}
+	part := parts[0].(map[string]any)
+	if part["type"] != "image_url" {
+		t.Fatalf("part type = %v, want image_url", part["type"])
+	}
+	if got := part["image_url"].(map[string]any)["url"]; got != "data:image/png;base64,QUJD" {
+		t.Fatalf("url = %v", got)
+	}
+}
+
+// A tool_result that returned only text keeps the flat string every chat
+// upstream already accepted, so prompt prefixes stay stable.
+func TestMessagesToChatToolResultTextStaysString(t *testing.T) {
+	in := jsonMap{
+		"model": "m",
+		"messages": []any{
+			map[string]any{
+				"role": "assistant",
+				"content": []any{
+					map[string]any{"type": "tool_use", "id": "t1", "name": "read", "input": map[string]any{}},
+				},
+			},
+			map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "tool_result", "tool_use_id": "t1", "content": []any{
+						map[string]any{"type": "text", "text": "first"},
+						map[string]any{"type": "text", "text": "second"},
+					}},
+				},
+			},
+		},
+	}
+	out := convertReq(t, Messages, Chat, in)
+	tool := out["messages"].([]any)[1].(map[string]any)
+	if got, ok := tool["content"].(string); !ok || got != "first\nsecond" {
+		t.Fatalf("content = %#v, want the joined string", tool["content"])
+	}
+}
+
+// Text beside an image survives: the media is added, not substituted for the
+// text the tool also returned.
+func TestMessagesToChatToolResultImageKeepsText(t *testing.T) {
+	in := jsonMap{
+		"model": "m",
+		"messages": []any{
+			map[string]any{
+				"role": "assistant",
+				"content": []any{
+					map[string]any{"type": "tool_use", "id": "t1", "name": "read", "input": map[string]any{}},
+				},
+			},
+			map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "tool_result", "tool_use_id": "t1", "content": []any{
+						map[string]any{"type": "text", "text": "icon.png is 1024x1024"},
+						map[string]any{"type": "image", "source": map[string]any{
+							"type": "url", "url": "https://x/a.png",
+						}},
+					}},
+				},
+			},
+		},
+	}
+	out := convertReq(t, Messages, Chat, in)
+	parts := out["messages"].([]any)[1].(map[string]any)["content"].([]any)
+	if len(parts) != 2 {
+		t.Fatalf("parts = %#v", parts)
+	}
+	if parts[0].(map[string]any)["text"] != "icon.png is 1024x1024" {
+		t.Fatalf("text lost: %#v", parts[0])
+	}
+	if got := parts[1].(map[string]any)["image_url"].(map[string]any)["url"]; got != "https://x/a.png" {
+		t.Fatalf("url = %v", got)
+	}
+}
+
+// A tool_choice naming a tool must reference the name the request actually
+// declares. Tool declarations are truncated to OpenAI's 64-char limit, so the
+// reference has to be truncated the same way — otherwise it points at a tool
+// the upstream never sees.
+func TestMessagesToChatToolChoiceNameTruncated(t *testing.T) {
+	long := strings.Repeat("a", 80)
+	in := jsonMap{
+		"model": "m",
+		"messages": []any{
+			map[string]any{"role": "user", "content": "hi"},
+		},
+		"tools": []any{
+			map[string]any{"name": long, "input_schema": map[string]any{"type": "object"}},
+		},
+		"tool_choice": map[string]any{"type": "tool", "name": long},
+	}
+	out := convertReq(t, Messages, Chat, in)
+	tools := out["tools"].([]any)
+	declared, _ := tools[0].(map[string]any)["function"].(map[string]any)["name"].(string)
+	choice, _ := out["tool_choice"].(map[string]any)["function"].(map[string]any)["name"].(string)
+	if choice != declared {
+		t.Fatalf("tool_choice names %q but the declaration is %q", choice, declared)
+	}
+	if len(declared) > 64 {
+		t.Fatalf("declared tool name is %d chars, over OpenAI's limit", len(declared))
+	}
+}
+
+// A user message that attached a document (a PDF, say) must not lose it when
+// the turn is folded onto the chat wire, where the attachment rides the same
+// image_url spelling an image does.
+func TestMessagesToChatUserDocumentKept(t *testing.T) {
+	in := jsonMap{
+		"model": "m",
+		"messages": []any{
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "text", "text": "summarize"},
+				map[string]any{"type": "document", "source": map[string]any{
+					"type": "base64", "media_type": "application/pdf", "data": "UERG",
+				}},
+			}},
+		},
+	}
+	out := convertReq(t, Messages, Chat, in)
+	parts, ok := out["messages"].([]any)[0].(map[string]any)["content"].([]any)
+	if !ok {
+		t.Fatalf("content = %#v", out["messages"].([]any)[0].(map[string]any)["content"])
+	}
+	if len(parts) != 2 {
+		t.Fatalf("document dropped: %#v", parts)
+	}
+	if got := parts[1].(map[string]any)["image_url"].(map[string]any)["url"]; got != "data:application/pdf;base64,UERG" {
+		t.Fatalf("url = %v", got)
+	}
+}

@@ -561,3 +561,113 @@ func TestPipeStreamWithSameDialectReportsTerminal(t *testing.T) {
 		t.Fatalf("same dialect changed bytes: %q", dst.String())
 	}
 }
+
+// Two parallel function calls in one Responses stream must reach a chat client
+// on distinct tool_calls indices. Chat addresses parallel calls by a dense
+// 0..n-1 index, so collapsing both onto 0 makes the client merge them into one
+// call and lose all but the last name and arguments.
+func TestPipeResponsesToChatParallelToolCallsKeepDistinctIndices(t *testing.T) {
+	src := strings.Join([]string{
+		`data: {"type":"response.created","response":{"id":"r1","model":"m"}}`,
+		``,
+		`data: {"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"a","arguments":""}}`,
+		``,
+		`data: {"type":"response.function_call_arguments.delta","output_index":1,"item_id":"fc_1","delta":"{\"x\":1}"}`,
+		``,
+		`data: {"type":"response.output_item.added","output_index":2,"item":{"type":"function_call","id":"fc_2","call_id":"call_2","name":"b","arguments":""}}`,
+		``,
+		`data: {"type":"response.function_call_arguments.delta","output_index":2,"item_id":"fc_2","delta":"{\"y\":2}"}`,
+		``,
+		`data: {"type":"response.completed","response":{"id":"r1","status":"completed","output":[]}}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	var dst bytes.Buffer
+	if _, err := PipeStream(Responses, Chat, &dst, strings.NewReader(src), StreamOpts{Model: "m"}); err != nil {
+		t.Fatal(err)
+	}
+	// Collect (index, name) per emitted tool_calls chunk.
+	names := map[float64]string{}
+	for _, e := range responseEvents(t, dst.String()) {
+		choices, _ := e["choices"].([]any)
+		if len(choices) == 0 {
+			continue
+		}
+		delta, _ := choices[0].(map[string]any)["delta"].(map[string]any)
+		calls, _ := delta["tool_calls"].([]any)
+		for _, c := range calls {
+			cm, _ := c.(map[string]any)
+			idx, _ := cm["index"].(float64)
+			if fn, ok := cm["function"].(map[string]any); ok {
+				if n, ok := fn["name"].(string); ok && n != "" {
+					names[idx] = n
+				}
+			}
+		}
+	}
+	if len(names) != 2 || names[0] != "a" || names[1] != "b" {
+		t.Fatalf("parallel calls collapsed: %v\n%s", names, dst.String())
+	}
+}
+
+// Anthropic numbers content blocks densely from 0. A chat source whose first
+// block is a tool call used to start at index 1, leaving a hole a client that
+// accumulates content[index] cannot fill.
+func TestPipeChatToMessagesToolBlocksStartAtZero(t *testing.T) {
+	src := strings.Join([]string{
+		`data: {"id":"c1","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","function":{"name":"a","arguments":""}}]}}]}`,
+		``,
+		`data: {"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_2","function":{"name":"b","arguments":""}}]}}]}`,
+		``,
+		`data: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	var dst bytes.Buffer
+	if _, err := PipeStream(Chat, Messages, &dst, strings.NewReader(src), StreamOpts{Model: "m"}); err != nil {
+		t.Fatal(err)
+	}
+	var starts []float64
+	for _, e := range responseEvents(t, dst.String()) {
+		if e["type"] == "content_block_start" {
+			idx, _ := e["index"].(float64)
+			starts = append(starts, idx)
+		}
+	}
+	if len(starts) != 2 || starts[0] != 0 || starts[1] != 1 {
+		t.Fatalf("content_block_start indices = %v, want [0 1]\n%s", starts, dst.String())
+	}
+}
+
+// The Responses -> Messages stream has the same dense-from-zero rule: the
+// first tool_use block is index 0.
+func TestPipeResponsesToMessagesToolBlockStartsAtZero(t *testing.T) {
+	src := strings.Join([]string{
+		`data: {"type":"response.created","response":{"id":"r1","model":"m"}}`,
+		``,
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"a","arguments":""}}`,
+		``,
+		`data: {"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_1","delta":"{}"}`,
+		``,
+		`data: {"type":"response.completed","response":{"id":"r1","status":"completed","output":[]}}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	var dst bytes.Buffer
+	if _, err := PipeStream(Responses, Messages, &dst, strings.NewReader(src), StreamOpts{Model: "m"}); err != nil {
+		t.Fatal(err)
+	}
+	var starts []float64
+	for _, e := range responseEvents(t, dst.String()) {
+		if e["type"] == "content_block_start" {
+			idx, _ := e["index"].(float64)
+			starts = append(starts, idx)
+		}
+	}
+	if len(starts) != 1 || starts[0] != 0 {
+		t.Fatalf("content_block_start indices = %v, want [0]\n%s", starts, dst.String())
+	}
+}

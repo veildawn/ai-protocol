@@ -2,6 +2,7 @@ package chatresponses
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"github.com/veildawn/ai-protocol/internal/jsonx"
 )
@@ -109,6 +110,16 @@ func ResponsesResponseToChat(body map[string]any) map[string]any {
 
 func chatChoicesToResponsesOutput(choices []any) []any {
 	var out []any
+	// Item ids are minted here the way the streaming path mints them, so a
+	// non-streamed body and the same body streamed agree on the shape. The
+	// Responses schema requires `id` on every output item, and a client that
+	// replays this output rejects an item without one.
+	seq := 0
+	nextID := func(prefix string) string {
+		id := fmt.Sprintf("%s_%d", prefix, seq)
+		seq++
+		return id
+	}
 	for _, ch := range choices {
 		cm, ok := jsonx.AsMap(ch)
 		if !ok {
@@ -120,6 +131,7 @@ func chatChoicesToResponsesOutput(choices []any) []any {
 		}
 		if rc := jsonx.GetString(msg, "reasoning_content"); rc != "" {
 			out = append(out, map[string]any{
+				"id":      nextID("rs"),
 				"type":    "reasoning",
 				"summary": []any{map[string]any{"type": "summary_text", "text": rc}},
 			})
@@ -134,7 +146,11 @@ func chatChoicesToResponsesOutput(choices []any) []any {
 				}
 			}
 			if len(summary) > 0 {
-				out = append(out, map[string]any{"type": "reasoning", "summary": summary})
+				out = append(out, map[string]any{
+					"id":      nextID("rs"),
+					"type":    "reasoning",
+					"summary": summary,
+				})
 			}
 		}
 		if tcs, ok := jsonx.AsSlice(msg["tool_calls"]); ok {
@@ -151,16 +167,19 @@ func chatChoicesToResponsesOutput(choices []any) []any {
 					name = jsonx.GetString(fn, "name")
 				}
 				out = append(out, map[string]any{
+					"id":        nextID("fc"),
 					"type":      "function_call",
 					"call_id":   jsonx.GetString(tm, "id"),
 					"name":      name,
 					"arguments": args,
+					"status":    "completed",
 				})
 			}
 		}
 		text := contentToPlain(msg["content"])
 		if text != "" {
 			out = append(out, map[string]any{
+				"id":      nextID("msg"),
 				"type":    "message",
 				"role":    "assistant",
 				"status":  "completed",

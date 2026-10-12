@@ -170,9 +170,13 @@ func (s *chatToMsgState) feedChatChunk(obj map[string]any) []stream.Event {
 			if _, seen := s.toolIndex[idx]; !seen {
 				id := jsonx.GetString(tm, "id")
 				evs = append(evs, s.closeBlock()...)
-				s.blockIndex++
-				if s.blockOpen {
-					s.blockIndex--
+				// Anthropic numbers content blocks densely from 0, so this
+				// call takes the slot after whatever block was open — the
+				// first one lands on 0. Advancing unconditionally would start
+				// the stream at index 1 and leave a hole a client accumulating
+				// content[index] cannot fill.
+				if s.blockType != "" {
+					s.blockIndex++
 				}
 				s.blockOpen = true
 				s.blockType = "tool_use"

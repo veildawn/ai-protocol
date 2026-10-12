@@ -440,7 +440,12 @@ func anthropicToolChoiceToOpenAI(v any) any {
 	case "none":
 		return "none"
 	case "tool":
-		return map[string]any{"type": "function", "function": map[string]any{"name": jsonx.GetString(m, "name")}}
+		// The name names a tool the request also declares, and that
+		// declaration is truncated to OpenAI's 64-char limit above — so this
+		// reference must be truncated the same way, or it points at a tool the
+		// upstream does not see and the request is rejected.
+		name := truncateToolName(jsonx.GetString(m, "name"))
+		return map[string]any{"type": "function", "function": map[string]any{"name": name}}
 	default:
 		return v
 	}
@@ -716,7 +721,10 @@ func anthropicMessagesToOpenAI(msgs []any) []any {
 				switch jsonx.GetString(bm, "type") {
 				case "text":
 					userParts = append(userParts, map[string]any{"type": "text", "text": jsonx.GetString(bm, "text")})
-				case "image":
+				case "image", "document":
+					// Both carry a source the chat wire takes as an image_url
+					// data URL (a PDF rides the same spelling), and dropping
+					// one would lose an attachment the caller sent.
 					if img := anthropicImageToOpenAI(bm); img != nil {
 						userParts = append(userParts, img)
 					}
@@ -850,20 +858,50 @@ func anthropicContentToText(content any) string {
 	}
 }
 
+// toolResultContent renders one Anthropic tool_result's content for the chat
+// wire, where a tool message carries the result.
+//
+// Text-only results keep the legacy flat string (so prompt prefixes stay
+// stable), but a result that returned media — a screenshot from a computer-use
+// tool, a generated file — cannot be represented that way: the media would be
+// flattened to its text and silently lost, and an Anthropic image block passed
+// through verbatim is not part of the chat vocabulary, so an upstream parsing
+// the chat vocabulary rejects the whole request. Such a result therefore
+// becomes a content-part array, the spelling every chat upstream accepts for a
+// message that carries more than text.
 func toolResultContent(v any) any {
 	switch t := v.(type) {
 	case string:
 		return t
 	case []any:
-		var parts []string
+		parts := make([]any, 0, len(t))
+		texts := make([]string, 0, len(t))
+		media := false
 		for _, p := range t {
-			if pm, ok := jsonx.AsMap(p); ok && jsonx.GetString(pm, "type") == "text" {
-				parts = append(parts, jsonx.GetString(pm, "text"))
+			pm, ok := jsonx.AsMap(p)
+			if !ok {
+				continue
+			}
+			switch jsonx.GetString(pm, "type") {
+			case "text":
+				texts = append(texts, jsonx.GetString(pm, "text"))
+				parts = append(parts, map[string]any{"type": "text", "text": jsonx.GetString(pm, "text")})
+			case "image", "document":
+				// A block whose source cannot be rendered is dropped rather
+				// than forwarded in a spelling the target rejects.
+				if img := anthropicImageToOpenAI(pm); img != nil {
+					media = true
+					parts = append(parts, img)
+				}
 			}
 		}
-		if len(parts) > 0 {
-			return strings.Join(parts, "\n")
+		if !media {
+			if len(texts) > 0 {
+				return strings.Join(texts, "\n")
+			}
+			break
 		}
+		return parts
 	}
 	if v == nil {
 		return ""

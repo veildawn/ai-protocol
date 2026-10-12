@@ -445,6 +445,7 @@ func contextManagementToResponses(cm map[string]any) []any {
 
 func thinkingFromReasoning(m map[string]any) []any {
 	var out []any
+	signature := jsonx.GetString(m, "encrypted_content")
 	if list, ok := jsonx.AsSlice(m["summary"]); ok {
 		for _, p := range list {
 			text := ""
@@ -454,9 +455,21 @@ func thinkingFromReasoning(m map[string]any) []any {
 				text = jsonx.String(p)
 			}
 			if text != "" {
-				out = append(out, map[string]any{"type": "thinking", "thinking": text})
+				block := map[string]any{"type": "thinking", "thinking": text}
+				// The opaque field rides along so the item can be replayed;
+				// without it a Messages target that requires a signed thinking
+				// block rejects the turn. Mirrors from_responses.go.
+				if signature != "" {
+					block["signature"] = signature
+				}
+				out = append(out, block)
 			}
 		}
+	}
+	// Reasoning the summary did not spell out still has to reach the target, or
+	// the assistant turn it belongs to arrives empty.
+	if len(out) == 0 && signature != "" {
+		out = append(out, map[string]any{"type": "redacted_thinking", "data": signature})
 	}
 	return out
 }

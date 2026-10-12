@@ -399,6 +399,40 @@ type respToChatState struct {
 	id    string
 	model string
 	done  bool
+	// fcSlots maps a Responses output_index to the chat tool_calls slot that
+	// item occupies. Chat addresses parallel calls by a dense 0..n-1 index, so
+	// two function_call items must land on distinct slots — reusing one slot
+	// makes a client merge them into a single call and lose all but the last
+	// name. The mapping is per item, and its key falls back to the call id when
+	// an event omits output_index.
+	fcSlots map[string]int
+}
+
+// fcSlot resolves the chat tool_calls index for one Responses output item,
+// assigning the next free slot the first time the item is seen.
+func (s *respToChatState) fcSlot(obj map[string]any, item map[string]any) int {
+	key := ""
+	if idx, ok := jsonx.Int(obj["output_index"]); ok {
+		key = "i" + strconv.Itoa(idx)
+	} else if id := jsonx.GetString(obj, "item_id"); id != "" {
+		key = "t" + id
+	} else if item != nil {
+		if id := jsonx.GetString(item, "id"); id != "" {
+			key = "t" + id
+		}
+	}
+	if key == "" {
+		return 0
+	}
+	if s.fcSlots == nil {
+		s.fcSlots = map[string]int{}
+	}
+	if slot, ok := s.fcSlots[key]; ok {
+		return slot
+	}
+	slot := len(s.fcSlots)
+	s.fcSlots[key] = slot
+	return slot
 }
 
 func (s *respToChatState) feed(event string, obj map[string]any) []stream.Event {
@@ -426,7 +460,7 @@ func (s *respToChatState) feed(event string, obj map[string]any) []stream.Event 
 	case "response.function_call_arguments.delta":
 		return []stream.Event{s.chunk(map[string]any{
 			"tool_calls": []any{map[string]any{
-				"index":    0,
+				"index":    s.fcSlot(obj, nil),
 				"function": map[string]any{"arguments": jsonx.String(obj["delta"])},
 			}},
 		}, nil)}
@@ -435,7 +469,7 @@ func (s *respToChatState) feed(event string, obj map[string]any) []stream.Event 
 		if item != nil && jsonx.GetString(item, "type") == "function_call" {
 			return []stream.Event{s.chunk(map[string]any{
 				"tool_calls": []any{map[string]any{
-					"index": 0,
+					"index": s.fcSlot(obj, item),
 					"id":    jsonx.GetString(item, "call_id"),
 					"type":  "function",
 					"function": map[string]any{

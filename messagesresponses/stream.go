@@ -480,11 +480,15 @@ func (s *respToMsg) feed(event string, obj map[string]any) []stream.Event {
 		item, _ := jsonx.AsMap(obj["item"])
 		if item != nil && jsonx.GetString(item, "type") == "function_call" {
 			evs = append(evs, s.close()...)
-			s.blockOpen = true
-			s.blockType = "tool_use"
+			// Anthropic numbers content blocks densely from 0: this call takes
+			// the slot after the block that was open, and the first one lands
+			// on 0. Checking blockType after assigning it would start every
+			// stream at index 1.
 			if s.blockType != "" {
 				s.blockIndex++
 			}
+			s.blockOpen = true
+			s.blockType = "tool_use"
 			evs = append(evs, stream.Event{Event: "content_block_start", Data: mustJSON(map[string]any{
 				"type": "content_block_start", "index": s.blockIndex,
 				"content_block": map[string]any{

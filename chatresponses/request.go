@@ -147,6 +147,23 @@ func chatMessagesToResponsesInput(msgs []any) (instructions string, input []any)
 			continue
 		}
 		if role == "assistant" {
+			// Order matters: a Responses replay expects the reasoning item
+			// before the call it produced, so the assistant turn is emitted
+			// reasoning -> message -> function_call.
+			if rc := jsonx.GetString(m, "reasoning_content"); rc != "" {
+				input = append(input, map[string]any{
+					"type":    "reasoning",
+					"summary": []any{map[string]any{"type": "summary_text", "text": rc}},
+				})
+			}
+			text := contentToPlain(m["content"])
+			if text != "" {
+				input = append(input, map[string]any{
+					"type":    "message",
+					"role":    "assistant",
+					"content": []any{map[string]any{"type": "output_text", "text": text}},
+				})
+			}
 			if tcs, ok := jsonx.AsSlice(m["tool_calls"]); ok {
 				for _, tc := range tcs {
 					tm, ok := jsonx.AsMap(tc)
@@ -170,20 +187,6 @@ func chatMessagesToResponsesInput(msgs []any) (instructions string, input []any)
 						"arguments": args,
 					})
 				}
-			}
-			if rc := jsonx.GetString(m, "reasoning_content"); rc != "" {
-				input = append(input, map[string]any{
-					"type":    "reasoning",
-					"summary": []any{map[string]any{"type": "summary_text", "text": rc}},
-				})
-			}
-			text := contentToPlain(m["content"])
-			if text != "" {
-				input = append(input, map[string]any{
-					"type":    "message",
-					"role":    "assistant",
-					"content": []any{map[string]any{"type": "output_text", "text": text}},
-				})
 			}
 			continue
 		}
@@ -256,7 +259,7 @@ func responsesInputToChatMessages(input any) ([]any, []string) {
 			msgs = append(msgs, map[string]any{
 				"role":         "tool",
 				"tool_call_id": jsonx.GetString(m, "call_id"),
-				"content":      jsonx.GetString(m, "output"),
+				"content":      functionCallOutputText(m["output"]),
 			})
 		case "function_call":
 			call := map[string]any{
@@ -406,6 +409,44 @@ func partsToText(content any, types ...string) string {
 		}
 		if _, ok := want[jsonx.GetString(pm, "type")]; ok || jsonx.GetString(pm, "type") == "" {
 			parts = appendInstruction(parts, jsonx.GetString(pm, "text"))
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+// functionCallOutputText renders a Responses function_call_output for the chat
+// wire, where a tool message carries text. The value is usually a plain string,
+// but a Responses client may send the structured form — a part list, or any
+// JSON value — and rendering that with fmt.Sprint would produce Go syntax
+// ("map[text:42 type:input_text]") the model cannot read. Text parts are
+// joined; anything else is re-encoded as JSON so the bytes stay parseable.
+func functionCallOutputText(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	list, ok := jsonx.AsSlice(v)
+	if !ok {
+		if v == nil {
+			return ""
+		}
+		if b, err := jsonx.Marshal(v); err == nil {
+			return string(b)
+		}
+		return ""
+	}
+	var parts []string
+	for _, p := range list {
+		if pm, ok := jsonx.AsMap(p); ok {
+			typ := jsonx.GetString(pm, "type")
+			if typ == "input_text" || typ == "output_text" || typ == "text" || typ == "" {
+				if t := jsonx.GetString(pm, "text"); t != "" {
+					parts = append(parts, t)
+				}
+				continue
+			}
+		}
+		if b, err := jsonx.Marshal(p); err == nil {
+			parts = append(parts, string(b))
 		}
 	}
 	return strings.Join(parts, "\n")
