@@ -369,3 +369,49 @@ func TestChatResponseToResponsesKeepsThinkingSignature(t *testing.T) {
 	}
 	t.Fatalf("no reasoning item in %#v", m["output"])
 }
+
+// The Responses SSE protocol numbers its events in emission order, and a
+// client that reassembles the stream reads the sequence.
+func TestResponsesStreamSequenceNumbersAreContiguous(t *testing.T) {
+	src := strings.Join([]string{
+		`data: {"id":"c1","model":"m","choices":[{"delta":{"reasoning_content":"r"}}]}`,
+		``,
+		`data: {"id":"c1","choices":[{"delta":{"content":"hi"}}]}`,
+		``,
+		`data: {"id":"c1","choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		``,
+	}, "\n")
+	var dst bytes.Buffer
+	if _, err := PipeStream(Chat, Responses, &dst, strings.NewReader(src), StreamOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	var seqs []float64
+	for _, chunk := range strings.Split(dst.String(), "\n\n") {
+		var data string
+		for _, line := range strings.Split(chunk, "\n") {
+			if p, ok := strings.CutPrefix(line, "data:"); ok {
+				data = strings.TrimSpace(p)
+			}
+		}
+		if data == "" || data == "[DONE]" {
+			continue
+		}
+		var m map[string]any
+		if json.Unmarshal([]byte(data), &m) != nil {
+			continue
+		}
+		n, ok := m["sequence_number"].(float64)
+		if !ok {
+			t.Fatalf("event without sequence_number: %s", data)
+		}
+		seqs = append(seqs, n)
+	}
+	if len(seqs) == 0 {
+		t.Fatal("no events")
+	}
+	for i, n := range seqs {
+		if n != float64(i) {
+			t.Fatalf("sequence numbers not contiguous in emission order: %v", seqs)
+		}
+	}
+}

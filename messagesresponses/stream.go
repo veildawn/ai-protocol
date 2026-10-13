@@ -192,7 +192,8 @@ func (s *msgToResp) openBlock(idx int, cb map[string]any) []stream.Event {
 
 func (s *msgToResp) openEvents(it *msgRespItem) []stream.Event {
 	var item map[string]any
-	var part stream.Event
+	var partType string
+	var partFields map[string]any
 	switch it.kind {
 	case "reasoning":
 		item = map[string]any{"id": it.id, "type": "reasoning", "summary": []any{}}
@@ -200,10 +201,11 @@ func (s *msgToResp) openEvents(it *msgRespItem) []stream.Event {
 			item["encrypted_content"] = it.encrypted
 		}
 		if !it.noSummary {
-			part = s.respEvent("response.reasoning_summary_part.added", map[string]any{
+			partType = "response.reasoning_summary_part.added"
+			partFields = map[string]any{
 				"item_id": it.id, "output_index": it.index, "summary_index": 0,
 				"part": map[string]any{"type": "summary_text", "text": ""},
-			})
+			}
 		}
 	case "function_call":
 		item = map[string]any{
@@ -215,16 +217,18 @@ func (s *msgToResp) openEvents(it *msgRespItem) []stream.Event {
 			"id": it.id, "type": "message", "role": "assistant",
 			"status": "in_progress", "content": []any{},
 		}
-		part = s.respEvent("response.content_part.added", map[string]any{
+		partType = "response.content_part.added"
+		partFields = map[string]any{
 			"item_id": it.id, "output_index": it.index, "content_index": 0,
 			"part": map[string]any{"type": "output_text", "text": ""},
-		})
+		}
 	}
+	// The events are built in emission order so their sequence numbers do too.
 	evs := []stream.Event{s.respEvent("response.output_item.added", map[string]any{
 		"output_index": it.index, "item": item,
 	})}
-	if part.Event != "" {
-		evs = append(evs, part)
+	if partType != "" {
+		evs = append(evs, s.respEvent(partType, partFields))
 	}
 	return evs
 }

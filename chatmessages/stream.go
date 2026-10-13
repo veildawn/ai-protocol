@@ -289,7 +289,6 @@ type msgToChatState struct {
 	// on the terminal chunk so the block can be replayed.
 	thinkingText string
 	thinkingSig  string
-	sawThinking  bool
 	sawRedacted  bool
 }
 
@@ -338,10 +337,6 @@ func (s *msgToChatState) feedAnthropic(event string, obj map[string]any) []strea
 			// the turn unreplayable against a target that verifies it.
 			s.thinkingSig = jsonx.GetString(cb, "data")
 			s.sawRedacted = true
-			return nil
-		}
-		if s.blockType == "thinking" {
-			s.sawThinking = true
 		}
 		return nil
 	case "content_block_delta":
@@ -352,7 +347,6 @@ func (s *msgToChatState) feedAnthropic(event string, obj map[string]any) []strea
 			return []stream.Event{s.chunk(map[string]any{"content": jsonx.GetString(delta, "text")}, "")}
 		case "thinking_delta":
 			s.thinkingText += jsonx.GetString(delta, "thinking")
-			s.sawThinking = true
 			return []stream.Event{s.chunk(map[string]any{"reasoning_content": jsonx.GetString(delta, "thinking")}, "")}
 		case "signature_delta":
 			// The signature rides a delta after the thinking text. It is held
@@ -390,7 +384,7 @@ func (s *msgToChatState) feedAnthropic(event string, obj map[string]any) []strea
 				"type": "redacted_thinking",
 				"data": s.thinkingSig,
 			}}
-		} else if s.sawThinking && s.thinkingSig != "" {
+		} else if s.thinkingSig != "" {
 			delta["thinking_blocks"] = []any{map[string]any{
 				"type":      "thinking",
 				"thinking":  s.thinkingText,
