@@ -244,8 +244,15 @@ func anthropicUsageToOpenAI(v any) map[string]any {
 		"completion_tokens": out,
 		"total_tokens":      prompt + out,
 	}
+	details := map[string]any{}
 	if cacheRead > 0 {
-		u["prompt_tokens_details"] = map[string]any{"cached_tokens": cacheRead}
+		details["cached_tokens"] = cacheRead
+	}
+	if cacheWrite > 0 {
+		details["cache_creation_tokens"] = cacheWrite
+	}
+	if len(details) > 0 {
+		u["prompt_tokens_details"] = details
 	}
 	return u
 }
