@@ -703,3 +703,42 @@ func TestResponsesOnlyToolsAreDropped(t *testing.T) {
 		}
 	}
 }
+
+// A thinking block with no text and no signature holds nothing a client could
+// need, and Anthropic rejects an empty one; a signature-only block is a real
+// response and must be kept so reasoning can be replayed.
+func TestChatToMessagesDropsEmptyUnsignedThinking(t *testing.T) {
+	empty := `{"id":"c","model":"m","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"x","thinking_blocks":[{"type":"thinking","thinking":""}]}}]}`
+	out, err := ConvertResponse(Chat, Messages, []byte(empty))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatal(err)
+	}
+	for _, block := range m["content"].([]any) {
+		if block.(map[string]any)["type"] == "thinking" {
+			t.Fatalf("empty unsigned thinking block kept: %#v", block)
+		}
+	}
+
+	signed := `{"id":"c","model":"m","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"x","thinking_blocks":[{"type":"thinking","thinking":"","signature":"SIG"}]}}]}`
+	out, err = ConvertResponse(Chat, Messages, []byte(signed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatal(err)
+	}
+	kept := false
+	for _, block := range m["content"].([]any) {
+		b := block.(map[string]any)
+		if b["type"] == "thinking" && b["signature"] == "SIG" {
+			kept = true
+		}
+	}
+	if !kept {
+		t.Fatalf("signature-only thinking block dropped: %#v", m["content"])
+	}
+}

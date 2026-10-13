@@ -77,9 +77,18 @@ func openaiChoicesToAnthropicContent(choices []any) []any {
 		}
 		if tbs, ok := jsonx.AsSlice(msg["thinking_blocks"]); ok {
 			for _, tb := range tbs {
-				if tm, ok := jsonx.AsMap(tb); ok {
-					content = append(content, tm)
+				tm, ok := jsonx.AsMap(tb)
+				if !ok {
+					continue
 				}
+				// A thinking block with no text and no signature holds nothing
+				// a client could need, and Anthropic rejects an empty one. A
+				// signature-only block is a real response and is kept: the
+				// client needs the signature to replay reasoning.
+				if isEmptyUnsignedThinkingBlock(tm) {
+					continue
+				}
+				content = append(content, tm)
 			}
 		} else if rc := jsonx.GetString(msg, "reasoning_content"); rc != "" {
 			content = append(content, map[string]any{"type": "thinking", "thinking": rc})
@@ -149,6 +158,19 @@ func chatContentToText(content any) string {
 	default:
 		return ""
 	}
+}
+
+// isEmptyUnsignedThinkingBlock reports a thinking block whose text is empty or
+// whitespace-only and which carries no signature — a block with nothing a
+// client could replay.
+func isEmptyUnsignedThinkingBlock(block map[string]any) bool {
+	if jsonx.GetString(block, "type") != "thinking" {
+		return false
+	}
+	if strings.TrimSpace(jsonx.GetString(block, "thinking")) != "" {
+		return false
+	}
+	return jsonx.GetString(block, "signature") == ""
 }
 
 func finishToStopReason(fr string) string {
