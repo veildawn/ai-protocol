@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 
+	"github.com/veildawn/ai-protocol/internal/dialectvocab"
 	"github.com/veildawn/ai-protocol/internal/jsonx"
 	"github.com/veildawn/ai-protocol/types"
 )
@@ -361,8 +362,21 @@ func responsesToolsToMessages(v any) []any {
 		if !ok {
 			continue
 		}
-		if jsonx.GetString(m, "type") == "web_search_preview" || jsonx.GetString(m, "type") == "web_search" {
+		typ := jsonx.GetString(m, "type")
+		if typ == "web_search_preview" || typ == "web_search" {
 			out = append(out, map[string]any{"type": "web_search_20260209", "name": "web_search"})
+			continue
+		}
+		// A Responses-only tool has no Messages equivalent, and forwarding it
+		// yields a tool with no name, which the upstream rejects. It is dropped
+		// rather than passed through.
+		if dialectvocab.IsResponsesOnlyTool(typ) {
+			continue
+		}
+		// An Anthropic-native tool keeps its own shape; rewriting it into a
+		// custom tool would drop the type that names it.
+		if dialectvocab.IsAnthropicHostedTool(typ) {
+			out = append(out, m)
 			continue
 		}
 		tool := map[string]any{"name": jsonx.GetString(m, "name")}

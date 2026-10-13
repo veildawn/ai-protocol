@@ -678,3 +678,28 @@ func TestMessagesToChatKeepsHostedTools(t *testing.T) {
 		}
 	}
 }
+
+// A Responses-only tool has no other dialect's equivalent, and forwarding it
+// makes the target reject the request for a missing function. It is dropped.
+func TestResponsesOnlyToolsAreDropped(t *testing.T) {
+	body := `{"model":"m","input":"x","tools":[{"type":"computer_use_preview"},{"type":"image_generation"},{"type":"shell"}]}`
+	for _, to := range []Dialect{Chat, Messages} {
+		var out Converted
+		var err error
+		if to == Messages {
+			out, err = ConvertRequestWith(Responses, to, []byte(body), ConvertOptions{MaxTokensFallback: 1})
+		} else {
+			out, err = ConvertRequest(Responses, to, []byte(body))
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(out.Body, &m); err != nil {
+			t.Fatal(err)
+		}
+		if tools, ok := m["tools"].([]any); ok && len(tools) > 0 {
+			t.Fatalf("folding to %s kept %#v", to, tools)
+		}
+	}
+}

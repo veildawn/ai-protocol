@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 
+	"github.com/veildawn/ai-protocol/internal/dialectvocab"
 	"github.com/veildawn/ai-protocol/internal/jsonx"
 	"github.com/veildawn/ai-protocol/types"
 )
@@ -706,6 +707,12 @@ func responsesToolsToChat(v any) []any {
 				"description": "web search",
 				"parameters":  map[string]any{"type": "object", "properties": map[string]any{}},
 			}})
+			continue
+		}
+		// A Responses-only tool has no chat equivalent, and forwarding it makes
+		// the upstream reject the whole request for a missing `function`. It is
+		// dropped rather than passed through.
+		if dialectvocab.IsResponsesOnlyTool(typ) {
 			continue
 		}
 		out = append(out, m)

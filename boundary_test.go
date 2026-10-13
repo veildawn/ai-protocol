@@ -266,9 +266,12 @@ func TestVendorRulesCatchWhatTheyClaim(t *testing.T) {
 // struct FIELDS are not, so a new field on an exported struct still needs a
 // human to notice it.
 var boundarySurfaceAllowlist = map[string][]string{
-	"chatmessages":      {"ChatResponseToMessages", "ChatToMessages", "MessagesResponseToChat", "MessagesToChat", "PipeChatToMessages", "PipeMessagesToChat", "StreamOpts"},
-	"chatresponses":     {"ChatResponseToResponses", "ChatToResponses", "PipeChatToResponses", "PipeResponsesToChat", "ResponsesResponseToChat", "ResponsesToChat", "StreamOpts"},
-	"internal/cerr":     {"UnsupportedParam", "UnsupportedParam.Error"},
+	"chatmessages":  {"ChatResponseToMessages", "ChatToMessages", "MessagesResponseToChat", "MessagesToChat", "PipeChatToMessages", "PipeMessagesToChat", "StreamOpts"},
+	"chatresponses": {"ChatResponseToResponses", "ChatToResponses", "PipeChatToResponses", "PipeResponsesToChat", "ResponsesResponseToChat", "ResponsesToChat", "StreamOpts"},
+	"internal/cerr": {"UnsupportedParam", "UnsupportedParam.Error"},
+	"internal/dialectvocab": {
+		"AnthropicHostedTools", "IsAnthropicHostedTool", "IsResponsesOnlyTool", "ResponsesOnlyTools",
+	},
 	"internal/jsonx":    {"AsMap", "AsSlice", "Bool", "CloneMap", "GetString", "Int", "JoinText", "Marshal", "String", "UnmarshalMap"},
 	"messagesresponses": {"MessagesResponseToResponses", "MessagesToResponses", "PipeMessagesToResponses", "PipeResponsesToMessages", "ResponsesRequestToMessages", "ResponsesToMessages", "StreamOpts"},
 	"protocol": {
