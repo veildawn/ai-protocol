@@ -815,3 +815,20 @@ func TestChatToMessagesDerivesMaxTokensFromThinking(t *testing.T) {
 		t.Fatal("a fold with nothing to derive max_tokens from must report it")
 	}
 }
+
+// The derivation applies wherever a fold into Messages produces thinking, not
+// only the chat fold.
+func TestResponsesToMessagesDerivesMaxTokensFromReasoning(t *testing.T) {
+	body := `{"model":"m","input":"x","reasoning":{"effort":"high"}}`
+	out, err := ConvertRequest(Responses, Messages, []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out.Body, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["max_tokens"] != float64(4096+4096) {
+		t.Fatalf("max_tokens = %#v, want the budget plus the default answer room", m["max_tokens"])
+	}
+}

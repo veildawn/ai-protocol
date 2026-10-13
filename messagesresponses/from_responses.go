@@ -35,6 +35,14 @@ func ResponsesRequestToMessages(body map[string]any) (map[string]any, error) {
 			out["thinking"] = th
 		}
 	}
+	// A Messages turn with thinking enabled needs room for the thinking plus
+	// the answer, so a request that named no ceiling gets one derived from the
+	// thinking budget rather than none at all.
+	if _, hasMax := out["max_tokens"]; !hasMax {
+		if budget, ok := dialectvocab.ThinkingBudget(out["thinking"]); ok {
+			out["max_tokens"] = budget + dialectvocab.DefaultMaxTokens
+		}
+	}
 	if text, ok := jsonx.AsMap(body["text"]); ok {
 		if fm, ok := jsonx.AsMap(text["format"]); ok && jsonx.GetString(fm, "type") == "json_schema" {
 			of := map[string]any{

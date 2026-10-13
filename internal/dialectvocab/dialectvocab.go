@@ -4,7 +4,10 @@
 // written out once per package.
 package dialectvocab
 
-import "strings"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // AnthropicHostedTools are the Anthropic-native tool types. Each owns a
 // reserved name the provider defines, so a tool of one of these types keeps its
@@ -41,4 +44,34 @@ func IsResponsesOnlyTool(t string) bool {
 		}
 	}
 	return false
+}
+
+// DefaultMaxTokens is the answer budget added to a thinking budget when a
+// request asks for thinking but names no output ceiling.
+const DefaultMaxTokens = 4096
+
+// ThinkingBudget reads the budget_tokens of an enabled thinking param.
+func ThinkingBudget(thinking any) (int, bool) {
+	m, ok := thinking.(map[string]any)
+	if !ok {
+		return 0, false
+	}
+	if t, _ := m["type"].(string); t != "enabled" {
+		return 0, false
+	}
+	switch n := m["budget_tokens"].(type) {
+	case int:
+		return n, true
+	case int64:
+		return int(n), true
+	case float64:
+		return int(n), true
+	case json.Number:
+		i, err := n.Int64()
+		if err != nil {
+			return 0, false
+		}
+		return int(i), true
+	}
+	return 0, false
 }

@@ -270,7 +270,8 @@ var boundarySurfaceAllowlist = map[string][]string{
 	"chatresponses": {"ChatResponseToResponses", "ChatToResponses", "PipeChatToResponses", "PipeResponsesToChat", "ResponsesResponseToChat", "ResponsesToChat", "StreamOpts"},
 	"internal/cerr": {"UnsupportedParam", "UnsupportedParam.Error"},
 	"internal/dialectvocab": {
-		"AnthropicHostedTools", "IsAnthropicHostedTool", "IsResponsesOnlyTool", "ResponsesOnlyTools",
+		"AnthropicHostedTools", "DefaultMaxTokens", "IsAnthropicHostedTool",
+		"IsResponsesOnlyTool", "ResponsesOnlyTools", "ThinkingBudget",
 	},
 	"internal/jsonx":    {"AsMap", "AsSlice", "Bool", "CloneMap", "GetString", "Int", "JoinText", "Marshal", "String", "UnmarshalMap"},
 	"messagesresponses": {"MessagesResponseToResponses", "MessagesToResponses", "PipeMessagesToResponses", "PipeResponsesToMessages", "ResponsesRequestToMessages", "ResponsesToMessages", "StreamOpts"},
