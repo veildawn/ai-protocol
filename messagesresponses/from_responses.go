@@ -136,7 +136,7 @@ func inputToMessages(input any) []any {
 				// for joins that turn. Two consecutive assistant messages are a
 				// request the target rejects.
 				if last, ok := trailingAssistant(msgs); ok {
-					last["content"] = appendBlocks(last["content"], toBlocks(blocks))
+					last["content"] = appendBlocks(last["content"], blocks)
 					continue
 				}
 				msgs = append(msgs, map[string]any{"role": "assistant", "content": blocks})
@@ -161,24 +161,9 @@ func trailingAssistant(msgs []any) (map[string]any, bool) {
 	return last, true
 }
 
-// toBlocks normalizes assistant content to a block list so it can be appended
-// to an existing turn.
-func toBlocks(content any) []any {
-	switch c := content.(type) {
-	case string:
-		if c == "" {
-			return nil
-		}
-		return []any{map[string]any{"type": "text", "text": c}}
-	case []any:
-		return c
-	}
-	return nil
-}
-
-// appendBlocks adds content blocks to an assistant turn's content, promoting a
-// bare string to a block list so the blocks have somewhere to go.
-func appendBlocks(content any, blocks []any) []any {
+// appendBlocks adds content to an assistant turn, promoting a bare string to a
+// text block so blocks have somewhere to go.
+func appendBlocks(content, add any) []any {
 	var out []any
 	switch c := content.(type) {
 	case string:
@@ -188,7 +173,15 @@ func appendBlocks(content any, blocks []any) []any {
 	case []any:
 		out = append(out, c...)
 	}
-	return append(out, blocks...)
+	switch a := add.(type) {
+	case string:
+		if a != "" {
+			out = append(out, map[string]any{"type": "text", "text": a})
+		}
+	case []any:
+		out = append(out, a...)
+	}
+	return out
 }
 
 // functionOutputToAnthropic renders a Responses function_call_output for an
@@ -292,12 +285,7 @@ func inputPartsToAnthropic(content any) any {
 			blocks = append(blocks, map[string]any{"type": "text", "text": jsonx.GetString(pm, "text")})
 		case "input_image":
 			url := jsonx.GetString(pm, "image_url")
-			block := map[string]any{"type": "image", "source": map[string]any{"type": "url", "url": url}}
-			if len(url) > 5 && url[:5] == "data:" {
-				media, data := splitDataURL(url)
-				block["source"] = map[string]any{"type": "base64", "media_type": media, "data": data}
-			}
-			blocks = append(blocks, block)
+			blocks = append(blocks, inputImageToAnthropicBlock(url))
 		}
 	}
 	if len(blocks) == 1 {

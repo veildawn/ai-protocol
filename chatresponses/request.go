@@ -462,13 +462,23 @@ func partsToText(content any, types ...string) string {
 }
 
 // functionCallOutputContent renders a Responses function_call_output for the
-// chat wire. A plain string output stays a string. A part list becomes a
-// content-part array when it carries media — flattening an image to its JSON
-// would lose it — and a joined string when it is text only.
+// chat wire. A plain string output stays a string, and any other JSON value is
+// re-encoded so the bytes stay parseable rather than rendering as Go syntax. A
+// part list becomes a content-part array when it carries media — flattening an
+// image to its JSON would lose it — and a joined string when it is text only.
 func functionCallOutputContent(v any) any {
 	list, ok := jsonx.AsSlice(v)
 	if !ok {
-		return functionCallOutputText(v)
+		if s, ok := v.(string); ok {
+			return s
+		}
+		if v == nil {
+			return ""
+		}
+		if b, err := jsonx.Marshal(v); err == nil {
+			return string(b)
+		}
+		return ""
 	}
 	var texts []string
 	var parts []any
@@ -518,44 +528,6 @@ func inputFileToDataURL(pm map[string]any) string {
 		return data
 	}
 	return jsonx.GetString(pm, "file_url")
-}
-
-// functionCallOutputText renders a Responses function_call_output for the chat
-// wire, where a tool message carries text. The value is usually a plain string,
-// but a Responses client may send the structured form — a part list, or any
-// JSON value — and rendering that with fmt.Sprint would produce Go syntax
-// ("map[text:42 type:input_text]") the model cannot read. Text parts are
-// joined; anything else is re-encoded as JSON so the bytes stay parseable.
-func functionCallOutputText(v any) string {
-	if s, ok := v.(string); ok {
-		return s
-	}
-	list, ok := jsonx.AsSlice(v)
-	if !ok {
-		if v == nil {
-			return ""
-		}
-		if b, err := jsonx.Marshal(v); err == nil {
-			return string(b)
-		}
-		return ""
-	}
-	var parts []string
-	for _, p := range list {
-		if pm, ok := jsonx.AsMap(p); ok {
-			typ := jsonx.GetString(pm, "type")
-			if typ == "input_text" || typ == "output_text" || typ == "text" || typ == "" {
-				if t := jsonx.GetString(pm, "text"); t != "" {
-					parts = append(parts, t)
-				}
-				continue
-			}
-		}
-		if b, err := jsonx.Marshal(p); err == nil {
-			parts = append(parts, string(b))
-		}
-	}
-	return strings.Join(parts, "\n")
 }
 
 // reasoningItemFromThinkingBlocks builds a Responses reasoning item from a chat
