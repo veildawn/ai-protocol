@@ -815,16 +815,22 @@ func textFormatToResponseFormat(text map[string]any) map[string]any {
 	}
 	switch jsonx.GetString(format, "type") {
 	case "json_schema":
-		return map[string]any{
-			"type": "json_schema",
-			"json_schema": map[string]any{
-				"name":   first(jsonx.GetString(format, "name"), "response_schema"),
-				"schema": format["schema"],
-				"strict": format["strict"],
-			},
+		js := map[string]any{
+			"name":   first(jsonx.GetString(format, "name"), "response_schema"),
+			"schema": format["schema"],
 		}
+		// A missing strict is stated as false rather than left null, which is
+		// not a value the schema takes.
+		if st, ok := jsonx.Bool(format["strict"]); ok {
+			js["strict"] = st
+		} else {
+			js["strict"] = false
+		}
+		return map[string]any{"type": "json_schema", "json_schema": js}
 	case "json_object":
 		return map[string]any{"type": "json_object"}
+	case "text":
+		return map[string]any{"type": "text"}
 	default:
 		return nil
 	}

@@ -536,3 +536,34 @@ func TestResponsesToMessagesKeepsCustomToolChoiceName(t *testing.T) {
 		t.Fatalf("tool_choice = %#v, want the named tool", tc)
 	}
 }
+
+// A text.format folded to a chat response_format must not carry a null strict,
+// and an explicit "text" format is a response_format the chat wire spells.
+func TestTextFormatFoldsToResponseFormat(t *testing.T) {
+	body := `{"model":"m","input":"x","text":{"format":{"type":"json_schema","name":"n","schema":{"type":"object"}}}}`
+	out, err := ConvertRequest(Responses, Chat, []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out.Body, &m); err != nil {
+		t.Fatal(err)
+	}
+	js := m["response_format"].(map[string]any)["json_schema"].(map[string]any)
+	if st, present := js["strict"]; !present || st != false {
+		t.Fatalf("strict = %#v, want a stated false", js["strict"])
+	}
+
+	body = `{"model":"m","input":"x","text":{"format":{"type":"text"}}}`
+	out, err = ConvertRequest(Responses, Chat, []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(out.Body, &m); err != nil {
+		t.Fatal(err)
+	}
+	rf, ok := m["response_format"].(map[string]any)
+	if !ok || rf["type"] != "text" {
+		t.Fatalf("response_format = %#v, want a text format", m["response_format"])
+	}
+}
