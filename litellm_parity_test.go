@@ -415,3 +415,26 @@ func TestResponsesStreamSequenceNumbersAreContiguous(t *testing.T) {
 		}
 	}
 }
+
+// A custom tool call carries its freeform payload in `input`; the chat wire
+// reads it as arguments, and dropping the item loses the call the model made.
+func TestResponsesToChatKeepsCustomToolCall(t *testing.T) {
+	body := `{"id":"r","status":"completed","output":[{"type":"custom_tool_call","call_id":"c1","name":"shell","input":"ls -la"}]}`
+	out, err := ConvertResponse(Responses, Chat, []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatal(err)
+	}
+	choice := m["choices"].([]any)[0].(map[string]any)
+	if choice["finish_reason"] != "tool_calls" {
+		t.Fatalf("finish_reason = %v", choice["finish_reason"])
+	}
+	call := choice["message"].(map[string]any)["tool_calls"].([]any)[0].(map[string]any)
+	fn := call["function"].(map[string]any)
+	if fn["name"] != "shell" || fn["arguments"] != "ls -la" {
+		t.Fatalf("tool call = %#v", fn)
+	}
+}

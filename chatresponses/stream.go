@@ -474,7 +474,7 @@ func (s *respToChatState) feed(event string, obj map[string]any) []stream.Event 
 			delta = jsonx.GetString(obj, "text")
 		}
 		return []stream.Event{s.chunk(map[string]any{"reasoning_content": jsonx.String(delta)}, nil)}
-	case "response.function_call_arguments.delta":
+	case "response.function_call_arguments.delta", "response.custom_tool_call_input.delta":
 		return []stream.Event{s.chunk(map[string]any{
 			"tool_calls": []any{map[string]any{
 				"index":    s.fcSlot(obj, nil),
@@ -483,7 +483,7 @@ func (s *respToChatState) feed(event string, obj map[string]any) []stream.Event 
 		}, nil)}
 	case "response.output_item.added":
 		item, _ := jsonx.AsMap(obj["item"])
-		if item != nil && jsonx.GetString(item, "type") == "function_call" {
+		if item != nil && isToolCallItem(item) {
 			return []stream.Event{s.chunk(map[string]any{
 				"tool_calls": []any{map[string]any{
 					"index": s.fcSlot(obj, item),
@@ -525,7 +525,7 @@ func (s *respToChatState) feed(event string, obj map[string]any) []stream.Event 
 		if status != "incomplete" && resp != nil {
 			if out, ok := jsonx.AsSlice(resp["output"]); ok {
 				for _, it := range out {
-					if im, ok := jsonx.AsMap(it); ok && jsonx.GetString(im, "type") == "function_call" {
+					if im, ok := jsonx.AsMap(it); ok && isToolCallItem(im) {
 						finish = "tool_calls"
 					}
 				}
@@ -546,6 +546,17 @@ func (s *respToChatState) feed(event string, obj map[string]any) []stream.Event 
 	default:
 		return nil
 	}
+}
+
+// isToolCallItem reports whether a Responses output item is a tool call. A
+// custom call carries its payload in `input` rather than `arguments`, but on
+// the chat wire both are a tool_call.
+func isToolCallItem(item map[string]any) bool {
+	switch jsonx.GetString(item, "type") {
+	case "function_call", "custom_tool_call":
+		return true
+	}
+	return false
 }
 
 func (s *respToChatState) chunk(delta map[string]any, finish any) stream.Event {

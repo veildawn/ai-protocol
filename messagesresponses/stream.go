@@ -480,14 +480,14 @@ func (s *respToMsg) feed(event string, obj map[string]any) []stream.Event {
 			"type": "content_block_delta", "index": s.blockIndex,
 			"delta": map[string]any{"type": "text_delta", "text": text},
 		})})
-	case "response.function_call_arguments.delta":
+	case "response.function_call_arguments.delta", "response.custom_tool_call_input.delta":
 		evs = append(evs, stream.Event{Event: "content_block_delta", Data: mustJSON(map[string]any{
 			"type": "content_block_delta", "index": s.blockIndex,
 			"delta": map[string]any{"type": "input_json_delta", "partial_json": jsonx.String(obj["delta"])},
 		})})
 	case "response.output_item.added":
 		item, _ := jsonx.AsMap(obj["item"])
-		if item != nil && jsonx.GetString(item, "type") == "function_call" {
+		if item != nil && isToolCallItem(item) {
 			evs = append(evs, s.close()...)
 			// Anthropic numbers content blocks densely from 0: this call takes
 			// the slot after the block that was open, and the first one lands
@@ -544,7 +544,7 @@ func (s *respToMsg) feed(event string, obj map[string]any) []stream.Event {
 			}
 			if out, ok := jsonx.AsSlice(resp["output"]); ok {
 				for _, it := range out {
-					if im, ok := jsonx.AsMap(it); ok && jsonx.GetString(im, "type") == "function_call" {
+					if im, ok := jsonx.AsMap(it); ok && isToolCallItem(im) {
 						stop = "tool_use"
 					}
 				}
@@ -613,6 +613,17 @@ func (s *respToMsg) finishFromSource() []stream.Event {
 	evs = append(evs, stream.Event{Event: "message_stop", Data: mustJSON(map[string]any{"type": "message_stop"})})
 	s.closed = true
 	return evs
+}
+
+// isToolCallItem reports whether a Responses output item is a tool call. A
+// custom call carries its payload in `input` rather than `arguments`, but both
+// name a call the model made.
+func isToolCallItem(item map[string]any) bool {
+	switch jsonx.GetString(item, "type") {
+	case "function_call", "custom_tool_call":
+		return true
+	}
+	return false
 }
 
 func mustJSON(v any) string {

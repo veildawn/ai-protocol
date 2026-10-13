@@ -131,6 +131,15 @@ func ResponsesToMessages(body map[string]any) (map[string]any, error) {
 				"input": input,
 			})
 			stop = "tool_use"
+		case "custom_tool_call":
+			// A custom call's freeform payload is not JSON, so it cannot become
+			// a tool_use input object; the text rides a text block so the call
+			// the model made is not lost.
+			content = append(content, map[string]any{
+				"type": "text",
+				"text": jsonx.GetString(m, "input"),
+			})
+			stop = "tool_use"
 		}
 	}
 	if jsonx.GetString(body, "status") == "incomplete" {

@@ -62,6 +62,18 @@ func ResponsesResponseToChat(body map[string]any) map[string]any {
 					"arguments": args,
 				},
 			})
+		case "custom_tool_call":
+			// A custom call carries its freeform payload in `input`; the chat
+			// wire reads it as arguments, and dropping the item would lose the
+			// call the model made.
+			toolCalls = append(toolCalls, map[string]any{
+				"id":   first(jsonx.GetString(m, "call_id"), jsonx.GetString(m, "id")),
+				"type": "function",
+				"function": map[string]any{
+					"name":      jsonx.GetString(m, "name"),
+					"arguments": jsonx.GetString(m, "input"),
+				},
+			})
 		case "reasoning":
 			// Several reasoning items in one turn read as one block, separated
 			// rather than run together.
