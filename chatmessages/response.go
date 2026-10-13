@@ -183,6 +183,10 @@ func stopReasonToFinish(sr string) string {
 	}
 }
 
+// openaiUsageToAnthropic maps a chat usage object onto the Messages shape.
+// OpenAI's prompt_tokens counts the whole prompt, cache reads and writes
+// included, while Anthropic's input_tokens is the uncached remainder and
+// reports the cache halves as fields of their own.
 func openaiUsageToAnthropic(v any) map[string]any {
 	m, ok := jsonx.AsMap(v)
 	if !ok {
@@ -196,17 +200,29 @@ func openaiUsageToAnthropic(v any) map[string]any {
 	if out == 0 {
 		out, _ = jsonx.Int(m["output_tokens"])
 	}
-	u := map[string]any{"input_tokens": in, "output_tokens": out}
+	cacheRead := 0
 	if d, ok := jsonx.AsMap(m["prompt_tokens_details"]); ok {
-		if c, ok := jsonx.Int(d["cached_tokens"]); ok && c > 0 {
-			u["cache_read_input_tokens"] = c
-		}
+		cacheRead, _ = jsonx.Int(d["cached_tokens"])
 	}
 	if c, ok := jsonx.Int(m["cache_read_input_tokens"]); ok && c > 0 {
-		u["cache_read_input_tokens"] = c
+		cacheRead = c
+	}
+	cacheWrite := 0
+	if d, ok := jsonx.AsMap(m["prompt_tokens_details"]); ok {
+		cacheWrite, _ = jsonx.Int(d["cache_creation_tokens"])
+		if cacheWrite == 0 {
+			cacheWrite, _ = jsonx.Int(d["cache_write_tokens"])
+		}
 	}
 	if c, ok := jsonx.Int(m["cache_creation_input_tokens"]); ok && c > 0 {
-		u["cache_creation_input_tokens"] = c
+		cacheWrite = c
+	}
+	u := map[string]any{"input_tokens": max(in-cacheRead-cacheWrite, 0), "output_tokens": out}
+	if cacheRead > 0 {
+		u["cache_read_input_tokens"] = cacheRead
+	}
+	if cacheWrite > 0 {
+		u["cache_creation_input_tokens"] = cacheWrite
 	}
 	return u
 }

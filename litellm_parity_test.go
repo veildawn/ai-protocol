@@ -584,3 +584,28 @@ func TestResponsesToMessagesStatesStrict(t *testing.T) {
 		t.Fatalf("strict = %#v, want a stated false", of["strict"])
 	}
 }
+
+// OpenAI's prompt_tokens counts the whole prompt, cache included, while
+// Anthropic's input_tokens is the uncached remainder and reports the cache
+// halves separately. Folding one onto the other must subtract.
+func TestChatToMessagesSplitsCacheFromInputTokens(t *testing.T) {
+	body := `{"id":"c","model":"m","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"x"}}],"usage":{"prompt_tokens":100,"completion_tokens":5,"total_tokens":105,"prompt_tokens_details":{"cached_tokens":80,"cache_creation_tokens":10}}}`
+	out, err := ConvertResponse(Chat, Messages, []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatal(err)
+	}
+	usage := m["usage"].(map[string]any)
+	if usage["input_tokens"] != float64(10) {
+		t.Fatalf("input_tokens = %#v, want the uncached remainder", usage["input_tokens"])
+	}
+	if usage["cache_read_input_tokens"] != float64(80) {
+		t.Fatalf("cache_read_input_tokens = %#v", usage)
+	}
+	if usage["cache_creation_input_tokens"] != float64(10) {
+		t.Fatalf("cache_creation_input_tokens = %#v", usage)
+	}
+}

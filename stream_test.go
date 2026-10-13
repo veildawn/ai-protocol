@@ -697,8 +697,10 @@ func TestPipeChatToMessagesKeepsInputTokens(t *testing.T) {
 	if usage == nil {
 		t.Fatalf("no message_delta usage:\n%s", dst.String())
 	}
-	if in, _ := usage["input_tokens"].(float64); in != 10 {
-		t.Fatalf("input_tokens = %v, want 10 (usage=%v)", usage["input_tokens"], usage)
+	// prompt_tokens is 10 and 3 of it was a cache read, so the uncached
+	// remainder Anthropic calls input_tokens is 7.
+	if in, _ := usage["input_tokens"].(float64); in != 7 {
+		t.Fatalf("input_tokens = %v, want 7 (usage=%v)", usage["input_tokens"], usage)
 	}
 	if out, _ := usage["output_tokens"].(float64); out != 5 {
 		t.Fatalf("output_tokens = %v, want 5", usage["output_tokens"])
