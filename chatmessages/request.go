@@ -333,7 +333,7 @@ func responseFormatToAnthropic(rf map[string]any) map[string]any {
 		if sm, ok := jsonx.AsMap(schema); ok {
 			out := map[string]any{"type": "json_schema"}
 			if s, ok := sm["schema"]; ok {
-				out["schema"] = s
+				out["schema"] = filterOutputSchemaForAnthropic(s)
 			}
 			if n := jsonx.GetString(sm, "name"); n != "" {
 				out["name"] = n
@@ -344,7 +344,7 @@ func responseFormatToAnthropic(rf map[string]any) map[string]any {
 			return out
 		}
 		if schema != nil {
-			return map[string]any{"type": "json_schema", "schema": schema}
+			return map[string]any{"type": "json_schema", "schema": filterOutputSchemaForAnthropic(schema)}
 		}
 	case "json_object":
 		return map[string]any{"type": "json_schema", "schema": map[string]any{"type": "object"}}

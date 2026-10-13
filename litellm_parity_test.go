@@ -742,3 +742,35 @@ func TestChatToMessagesDropsEmptyUnsignedThinking(t *testing.T) {
 		t.Fatalf("signature-only thinking block dropped: %#v", m["content"])
 	}
 }
+
+// Anthropic compiles a structured-output schema into a grammar and rejects the
+// JSON Schema keywords that grammar cannot express, so each is dropped and
+// stated in the schema's own description; oneOf becomes the anyOf it accepts.
+func TestChatToMessagesFiltersOutputSchema(t *testing.T) {
+	body := `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":"x"}],"response_format":{"type":"json_schema","json_schema":{"name":"n","schema":{"type":"object","properties":{"a":{"type":"array","maxItems":3,"items":{"type":"string"}}},"oneOf":[{"type":"object"}]}}}}`
+	out, err := ConvertRequest(Chat, Messages, []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out.Body, &m); err != nil {
+		t.Fatal(err)
+	}
+	schema := m["output_format"].(map[string]any)["schema"].(map[string]any)
+	if _, present := schema["oneOf"]; present {
+		t.Fatalf("oneOf kept: %#v", schema)
+	}
+	if _, ok := schema["anyOf"]; !ok {
+		t.Fatalf("oneOf not rewritten to anyOf: %#v", schema)
+	}
+	if schema["additionalProperties"] != false {
+		t.Fatalf("an object schema must state additionalProperties=false: %#v", schema)
+	}
+	a := schema["properties"].(map[string]any)["a"].(map[string]any)
+	if _, present := a["maxItems"]; present {
+		t.Fatalf("maxItems kept: %#v", a)
+	}
+	if !strings.Contains(a["description"].(string), "maximum number of items: 3") {
+		t.Fatalf("dropped constraint not stated: %#v", a)
+	}
+}
