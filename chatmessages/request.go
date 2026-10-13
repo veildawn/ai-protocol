@@ -285,22 +285,19 @@ func reasoningEffortString(v any) (string, bool) {
 }
 
 // validUserID reports whether a chat `user` value may ride Messages metadata as
-// user_id. Anthropic rejects an email or a phone number there.
+// user_id. Anthropic rejects an email address or a phone number there.
 func validUserID(v string) bool {
 	if strings.Contains(v, "@") {
 		return false
 	}
-	digits := 0
 	for _, r := range v {
 		switch {
-		case r >= '0' && r <= '9':
-			digits++
-		case r == '+' || r == ' ' || r == '(' || r == ')' || r == '-':
+		case r >= '0' && r <= '9', r == '+', r == ' ', r == '(', r == ')', r == '-':
 		default:
 			return true
 		}
 	}
-	return digits < 7
+	return len(v) < 7
 }
 
 func thinkingFromEffort(effort string) (map[string]any, error) {
