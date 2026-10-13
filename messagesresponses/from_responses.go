@@ -382,8 +382,21 @@ func responsesToolChoiceToMessages(v any) any {
 			return map[string]any{"type": "auto"}
 		}
 	case map[string]any:
-		if jsonx.GetString(t, "type") == "function" {
-			return map[string]any{"type": "tool", "name": jsonx.GetString(t, "name")}
+		typ := jsonx.GetString(t, "type")
+		if typ == "function" || typ == "custom" {
+			// A custom choice nests its name under `custom`; a named choice
+			// means "call this tool", and dropping the name would tell the
+			// model to pick any tool instead.
+			name := jsonx.GetString(t, "name")
+			if name == "" {
+				if nested, ok := jsonx.AsMap(t[typ]); ok {
+					name = jsonx.GetString(nested, "name")
+				}
+			}
+			if name != "" {
+				return map[string]any{"type": "tool", "name": name}
+			}
+			return map[string]any{"type": "any"}
 		}
 	}
 	return map[string]any{"type": "auto"}

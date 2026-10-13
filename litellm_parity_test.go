@@ -518,3 +518,21 @@ func TestResponsesToolChoiceWithoutNameBecomesRequired(t *testing.T) {
 		}
 	}
 }
+
+// A Responses choice naming a custom tool still names a tool; folding it to
+// "auto" would tell the model to pick any tool instead.
+func TestResponsesToMessagesKeepsCustomToolChoiceName(t *testing.T) {
+	body := `{"model":"m","max_output_tokens":10,"input":"x","tool_choice":{"type":"custom","name":"c"}}`
+	out, err := ConvertRequest(Responses, Messages, []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out.Body, &m); err != nil {
+		t.Fatal(err)
+	}
+	tc := m["tool_choice"].(map[string]any)
+	if tc["type"] != "tool" || tc["name"] != "c" {
+		t.Fatalf("tool_choice = %#v, want the named tool", tc)
+	}
+}
