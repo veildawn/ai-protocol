@@ -284,6 +284,13 @@ type msgToChatState struct {
 	done      bool
 	blockType string
 	usage     map[string]any
+	// thinkingText and thinkingSig accumulate a thinking block's content and
+	// its signature, which arrive on separate deltas and are emitted together
+	// on the terminal chunk so the block can be replayed.
+	thinkingText string
+	thinkingSig  string
+	sawThinking  bool
+	sawRedacted  bool
 }
 
 func (s *msgToChatState) feedAnthropic(event string, obj map[string]any) []stream.Event {
@@ -325,6 +332,17 @@ func (s *msgToChatState) feedAnthropic(event string, obj map[string]any) []strea
 				}},
 			}, "")}
 		}
+		if s.blockType == "redacted_thinking" {
+			// A redacted block carries opaque bytes and no readable text. The
+			// chat wire spells it as a thinking block, and dropping it leaves
+			// the turn unreplayable against a target that verifies it.
+			s.thinkingSig = jsonx.GetString(cb, "data")
+			s.sawRedacted = true
+			return nil
+		}
+		if s.blockType == "thinking" {
+			s.sawThinking = true
+		}
 		return nil
 	case "content_block_delta":
 		delta, _ := jsonx.AsMap(obj["delta"])
@@ -333,7 +351,15 @@ func (s *msgToChatState) feedAnthropic(event string, obj map[string]any) []strea
 		case "text_delta":
 			return []stream.Event{s.chunk(map[string]any{"content": jsonx.GetString(delta, "text")}, "")}
 		case "thinking_delta":
+			s.thinkingText += jsonx.GetString(delta, "thinking")
+			s.sawThinking = true
 			return []stream.Event{s.chunk(map[string]any{"reasoning_content": jsonx.GetString(delta, "thinking")}, "")}
+		case "signature_delta":
+			// The signature rides a delta after the thinking text. It is held
+			// until the terminal chunk, where it goes out with the block it
+			// signs — a chat client replays it on the next turn.
+			s.thinkingSig = jsonx.GetString(delta, "signature")
+			return nil
 		case "input_json_delta":
 			return []stream.Event{s.chunk(map[string]any{
 				"tool_calls": []any{map[string]any{
@@ -354,7 +380,24 @@ func (s *msgToChatState) feedAnthropic(event string, obj map[string]any) []strea
 		if um, ok := jsonx.AsMap(obj["usage"]); ok {
 			s.usage = mergeUsage(s.usage, um)
 		}
-		chunk := s.fullChunk(map[string]any{}, fr)
+		delta := map[string]any{}
+		// The thinking block goes out with the terminal chunk: its text has
+		// already streamed as reasoning_content, but its signature (or the
+		// opaque bytes of a redacted block) can only ride a thinking block,
+		// and a chat client needs it to replay the turn.
+		if s.sawRedacted {
+			delta["thinking_blocks"] = []any{map[string]any{
+				"type": "redacted_thinking",
+				"data": s.thinkingSig,
+			}}
+		} else if s.sawThinking && s.thinkingSig != "" {
+			delta["thinking_blocks"] = []any{map[string]any{
+				"type":      "thinking",
+				"thinking":  s.thinkingText,
+				"signature": s.thinkingSig,
+			}}
+		}
+		chunk := s.fullChunk(delta, fr)
 		if s.usage != nil {
 			chunk["usage"] = anthropicUsageToOpenAI(s.usage)
 		}

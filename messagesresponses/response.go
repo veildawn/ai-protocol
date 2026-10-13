@@ -71,9 +71,19 @@ func MessagesResponseToResponses(body map[string]any) map[string]any {
 	}
 	usage := body["usage"]
 	in, out := 0, 0
+	cacheRead := 0
 	if um, ok := jsonx.AsMap(usage); ok {
 		in, _ = jsonx.Int(um["input_tokens"])
 		out, _ = jsonx.Int(um["output_tokens"])
+		cacheRead, _ = jsonx.Int(um["cache_read_input_tokens"])
+	}
+	usageOut := map[string]any{
+		"input_tokens":  in,
+		"output_tokens": out,
+		"total_tokens":  in + out,
+	}
+	if cacheRead > 0 {
+		usageOut["input_tokens_details"] = map[string]any{"cached_tokens": cacheRead}
 	}
 	resp := map[string]any{
 		"id":     jsonx.GetString(body, "id"),
@@ -81,11 +91,7 @@ func MessagesResponseToResponses(body map[string]any) map[string]any {
 		"model":  jsonx.GetString(body, "model"),
 		"status": status,
 		"output": output,
-		"usage": map[string]any{
-			"input_tokens":  in,
-			"output_tokens": out,
-			"total_tokens":  in + out,
-		},
+		"usage":  usageOut,
 	}
 	if status == "incomplete" {
 		resp["incomplete_details"] = map[string]any{"reason": incomplete}

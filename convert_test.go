@@ -245,8 +245,10 @@ func TestMessagesToResponsesMapping(t *testing.T) {
 	if reasoning["effort"] != "high" { // 5000 >= 4096
 		t.Fatalf("effort=%v", reasoning["effort"])
 	}
-	if reasoning["summary"] != "detailed" {
-		t.Fatalf("summary")
+	// A summary is only carried when the caller asked for one; a default would
+	// change what every request asks for.
+	if _, ok := reasoning["summary"]; ok {
+		t.Fatalf("summary should be absent, got %v", reasoning["summary"])
 	}
 	text := out["text"].(map[string]any)["format"].(map[string]any)
 	if text["name"] != "structured_output" {
@@ -1052,7 +1054,9 @@ func TestMessagesToResponsesToolResultMedia(t *testing.T) {
 		pm, _ := p.(map[string]any)
 		switch pm["type"] {
 		case "input_text":
-			sawText = pm["text"] == "see"
+			// The output also carries a placeholder pointing at the re-attached
+			// images, so the text is no longer the bare string.
+			sawText = strings.HasPrefix(pm["text"].(string), "see")
 		case "input_file":
 			sawFile = true
 		}
@@ -1060,12 +1064,21 @@ func TestMessagesToResponsesToolResultMedia(t *testing.T) {
 	if !sawText || !sawFile {
 		t.Fatalf("output parts = %#v, want the text and the document", parts)
 	}
-	// The image cannot ride the output, so it is re-attached as a user turn.
+	// The image cannot ride the output, so it is re-attached as a user turn,
+	// opened by a boundary line marking the images as tool output.
 	imgMsg := input[1].(map[string]any)
 	if imgMsg["role"] != "user" {
 		t.Fatalf("second item = %#v, want a user message", imgMsg)
 	}
-	imgPart := imgMsg["content"].([]any)[0].(map[string]any)
+	imgParts := imgMsg["content"].([]any)
+	if len(imgParts) != 2 {
+		t.Fatalf("content = %#v, want a boundary part and the image", imgParts)
+	}
+	boundary := imgParts[0].(map[string]any)
+	if boundary["type"] != "input_text" || !strings.Contains(boundary["text"].(string), "tool output") {
+		t.Fatalf("boundary part = %#v", boundary)
+	}
+	imgPart := imgParts[1].(map[string]any)
 	if imgPart["type"] != "input_image" || imgPart["image_url"] != "data:image/png;base64,AA" {
 		t.Fatalf("image part = %#v", imgPart)
 	}
