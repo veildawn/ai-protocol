@@ -774,3 +774,21 @@ func TestChatToMessagesFiltersOutputSchema(t *testing.T) {
 		t.Fatalf("dropped constraint not stated: %#v", a)
 	}
 }
+
+// A top-level cache_control marks the request for automatic prompt caching; it
+// was in the accepted vocabulary but never copied to the output.
+func TestChatToMessagesKeepsTopLevelCacheControl(t *testing.T) {
+	body := `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":"x"}],"cache_control":{"type":"ephemeral"}}`
+	out, err := ConvertRequest(Chat, Messages, []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out.Body, &m); err != nil {
+		t.Fatal(err)
+	}
+	cc, ok := m["cache_control"].(map[string]any)
+	if !ok || cc["type"] != "ephemeral" {
+		t.Fatalf("cache_control = %#v, want it carried through", m["cache_control"])
+	}
+}

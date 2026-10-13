@@ -140,6 +140,8 @@ func ChatToMessages(body map[string]any, dropParams bool) (map[string]any, error
 	}
 	copyIf(body, out, "context_management")
 	copyIf(body, out, "speed")
+	// A top-level cache_control marks the request for automatic prompt caching.
+	copyIf(body, out, "cache_control")
 	// Parameters outside the Chat vocabulary pass through untranslated.
 	for k, v := range body {
 		if _, isOA := openaiChatParams[k]; isOA {
