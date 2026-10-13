@@ -36,11 +36,18 @@ func ResponsesRequestToMessages(body map[string]any) (map[string]any, error) {
 	}
 	if text, ok := jsonx.AsMap(body["text"]); ok {
 		if fm, ok := jsonx.AsMap(text["format"]); ok && jsonx.GetString(fm, "type") == "json_schema" {
-			out["output_format"] = map[string]any{
+			of := map[string]any{
 				"type":   "json_schema",
 				"schema": fm["schema"],
-				"strict": fm["strict"],
 			}
+			// A missing strict is stated as false rather than left null, which
+			// is not a value the field takes.
+			if st, ok := jsonx.Bool(fm["strict"]); ok {
+				of["strict"] = st
+			} else {
+				of["strict"] = false
+			}
+			out["output_format"] = of
 		}
 	}
 	if uid := jsonx.GetString(body, "user"); uid != "" {

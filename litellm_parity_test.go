@@ -567,3 +567,20 @@ func TestTextFormatFoldsToResponseFormat(t *testing.T) {
 		t.Fatalf("response_format = %#v, want a text format", m["response_format"])
 	}
 }
+
+// A json_schema format folded to Messages must not carry a null strict.
+func TestResponsesToMessagesStatesStrict(t *testing.T) {
+	body := `{"model":"m","max_output_tokens":10,"input":"x","text":{"format":{"type":"json_schema","name":"n","schema":{"type":"object"}}}}`
+	out, err := ConvertRequest(Responses, Messages, []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out.Body, &m); err != nil {
+		t.Fatal(err)
+	}
+	of := m["output_format"].(map[string]any)
+	if st, present := of["strict"]; !present || st != false {
+		t.Fatalf("strict = %#v, want a stated false", of["strict"])
+	}
+}
