@@ -713,28 +713,10 @@ func responsesToolsToChat(v any) []any {
 	return out
 }
 
+// chatToolChoiceToResponses maps a chat tool_choice to the Responses shape.
+// Chat nests a named choice under `function`/`custom`; Responses takes the name
+// at the top level, so the nested object is flattened rather than forwarded.
 func chatToolChoiceToResponses(v any) any {
-	switch t := v.(type) {
-	case string:
-		return t
-	case map[string]any:
-		typ := jsonx.GetString(t, "type")
-		if fn, ok := jsonx.AsMap(t["function"]); ok {
-			name := jsonx.GetString(fn, "name")
-			if name != "" {
-				return map[string]any{"type": "function", "name": name}
-			}
-		}
-		if typ == "function" && jsonx.GetString(t, "name") != "" {
-			return t
-		}
-		return t
-	default:
-		return v
-	}
-}
-
-func responsesToolChoiceToChat(v any) any {
 	switch t := v.(type) {
 	case string:
 		return t
@@ -743,13 +725,52 @@ func responsesToolChoiceToChat(v any) any {
 		switch typ {
 		case "auto", "none", "required":
 			return typ
+		case "function", "custom":
+			if name := jsonx.GetString(t, "name"); name != "" {
+				return map[string]any{"type": typ, "name": name}
+			}
+			if nested, ok := jsonx.AsMap(t[typ]); ok {
+				if name := jsonx.GetString(nested, "name"); name != "" {
+					return map[string]any{"type": typ, "name": name}
+				}
+			}
+		}
+		return t
+	default:
+		return v
+	}
+}
+
+// responsesToolChoiceToChat maps a Responses tool_choice to the chat shape.
+// Chat nests a named choice under `function`, and a choice that names no tool
+// means "any tool" — the chat spelling for that is "required".
+func responsesToolChoiceToChat(v any) any {
+	switch t := v.(type) {
+	case string:
+		return t
+	case map[string]any:
+		// A choice that already carries a chat-shaped function name is
+		// forwarded untouched.
+		if fn, ok := jsonx.AsMap(t["function"]); ok && jsonx.GetString(fn, "name") != "" {
+			return t
+		}
+		typ := jsonx.GetString(t, "type")
+		switch typ {
+		case "auto", "none", "required":
+			return typ
 		case "tool", "any":
 			return "required"
-		case "function":
-			if jsonx.GetString(t, "name") != "" && t["function"] == nil {
-				return map[string]any{"type": "function", "function": map[string]any{"name": jsonx.GetString(t, "name")}}
+		case "function", "custom":
+			name := jsonx.GetString(t, "name")
+			if name == "" {
+				if nested, ok := jsonx.AsMap(t[typ]); ok {
+					name = jsonx.GetString(nested, "name")
+				}
 			}
-			return t
+			if name != "" {
+				return map[string]any{"type": "function", "function": map[string]any{"name": name}}
+			}
+			return "required"
 		default:
 			return t
 		}

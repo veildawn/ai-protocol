@@ -472,3 +472,49 @@ func TestChatUsageTailIsFoldedIntoTheTerminal(t *testing.T) {
 		t.Fatalf("usage lost folding to Responses:\n%s", toResponses.String())
 	}
 }
+
+// A chat tool_choice nests a named choice under function/custom, while the
+// Responses API takes the name at the top level; and a type-only dict is the
+// string the chat wire spells it as.
+func TestToolChoiceShapeMatchesTheReference(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{`{"type":"auto"}`, `"auto"`},
+		{`{"type":"required"}`, `"required"`},
+		{`{"type":"function","name":"f"}`, `{"name":"f","type":"function"}`},
+		{`{"type":"custom","custom":{"name":"c"}}`, `{"name":"c","type":"custom"}`},
+	}
+	for _, tc := range cases {
+		body := `{"model":"m","messages":[{"role":"user","content":"x"}],"tool_choice":` + tc.in + `}`
+		out, err := ConvertRequest(Chat, Responses, []byte(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(out.Body, &m); err != nil {
+			t.Fatal(err)
+		}
+		got, _ := json.Marshal(m["tool_choice"])
+		if string(got) != tc.want {
+			t.Fatalf("tool_choice %s -> %s, want %s", tc.in, got, tc.want)
+		}
+	}
+}
+
+// A Responses choice that names no tool means "any tool", which the chat wire
+// spells "required".
+func TestResponsesToolChoiceWithoutNameBecomesRequired(t *testing.T) {
+	for _, in := range []string{`{"type":"function"}`, `{"type":"tool"}`, `{"type":"any"}`} {
+		body := `{"model":"m","input":"x","tool_choice":` + in + `}`
+		out, err := ConvertRequest(Responses, Chat, []byte(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(out.Body, &m); err != nil {
+			t.Fatal(err)
+		}
+		if m["tool_choice"] != "required" {
+			t.Fatalf("tool_choice %s -> %v, want required", in, m["tool_choice"])
+		}
+	}
+}
