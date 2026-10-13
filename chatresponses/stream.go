@@ -124,6 +124,10 @@ type chatToRespState struct {
 	rs     *chatRespItem            // the one reasoning item, opened lazily
 	fcs    map[string]*chatRespItem // tool-call key → item
 	lastFC *chatRespItem            // fallback target for keyless arg fragments
+	// pendingStop holds a finish_reason seen on a chunk that carried no usage.
+	// Under stream_options.include_usage the usage arrives in a later
+	// choices-less chunk, so the terminal event waits for it.
+	pendingStop string
 }
 
 // respEvent builds one Responses event. Every event carries a sequence_number
@@ -362,9 +366,21 @@ func (s *chatToRespState) feed(obj map[string]any) []stream.Event {
 				}
 			}
 		}
-		if fr := jsonx.GetString(ch, "finish_reason"); fr != "" {
+		if fr := jsonx.GetString(ch, "finish_reason"); fr != "" && !s.closed {
+			// Under stream_options.include_usage the usage rides a later
+			// choices-less chunk, so the terminal event waits for it rather
+			// than reporting zero tokens for a turn that has a real count.
+			if obj["usage"] == nil {
+				s.pendingStop = fr
+				return evs
+			}
 			evs = append(evs, s.complete(obj["usage"], fr)...)
 		}
+		return evs
+	}
+	// A usage-only chunk closes the turn whose finish_reason was held for it.
+	if choices, _ := jsonx.AsSlice(obj["choices"]); s.pendingStop != "" && len(choices) == 0 {
+		return s.complete(obj["usage"], s.pendingStop)
 	}
 	return evs
 }
@@ -401,7 +417,12 @@ func (s *chatToRespState) finish() []stream.Event {
 	if s.closed || !s.started {
 		return nil
 	}
-	return s.complete(nil, "stop")
+	// A held stop_reason whose usage never arrived still closes the turn.
+	finish := "stop"
+	if s.pendingStop != "" {
+		finish = s.pendingStop
+	}
+	return s.complete(nil, finish)
 }
 
 type respToChatState struct {

@@ -101,6 +101,11 @@ type chatToMsgState struct {
 	model      string
 	toolIndex  map[int]int // openai tool index -> anthropic block index
 	closed     bool
+	// pendingStop holds a finish_reason seen on a chunk that carried no usage.
+	// Under stream_options.include_usage the usage arrives in a later
+	// choices-less chunk, so the terminal frames wait for it rather than
+	// reporting zero tokens.
+	pendingStop string
 }
 
 func (s *chatToMsgState) feedChatChunk(obj map[string]any) []stream.Event {
@@ -111,6 +116,12 @@ func (s *chatToMsgState) feedChatChunk(obj map[string]any) []stream.Event {
 		s.model = m
 	}
 	var evs []stream.Event
+	// A usage-only chunk closes a turn whose finish_reason already arrived:
+	// the terminal frames were held for exactly this, so emit them now with
+	// the real counts rather than the zero the earlier chunk would have forced.
+	if choices, _ := jsonx.AsSlice(obj["choices"]); s.pendingStop != "" && len(choices) == 0 {
+		return s.terminal(s.pendingStop, openaiUsageToAnthropic(obj["usage"]))
+	}
 	if !s.started {
 		s.started = true
 		// The opening message carries the fields an Anthropic client reads
@@ -207,20 +218,29 @@ func (s *chatToMsgState) feedChatChunk(obj map[string]any) []stream.Event {
 	// violation a client reading the stream cannot reconcile.
 	if fr := jsonx.GetString(ch, "finish_reason"); fr != "" && !s.closed {
 		evs = append(evs, s.closeBlock()...)
-		// The terminal usage is cumulative and carries both halves, and an
-		// Anthropic client reads input tokens from here — reporting only
-		// output_tokens drops the prompt count (and the cache split) entirely,
-		// since message_start could not know them yet.
-		usage := openaiUsageToAnthropic(obj["usage"])
-		evs = append(evs, stream.Event{Event: "message_delta", Data: mustJSON(map[string]any{
-			"type":  "message_delta",
-			"delta": map[string]any{"stop_reason": finishToStopReason(fr), "stop_sequence": nil},
-			"usage": usage,
-		})})
-		evs = append(evs, stream.Event{Event: "message_stop", Data: mustJSON(map[string]any{"type": "message_stop"})})
-		s.closed = true
+		// Under stream_options.include_usage the usage rides a later
+		// choices-less chunk, so the terminal frames wait for it: emitting
+		// them now would report zero tokens for a turn that has a real count.
+		if len(choices) == 0 || obj["usage"] == nil {
+			s.pendingStop = fr
+			return evs
+		}
+		evs = append(evs, s.terminal(fr, openaiUsageToAnthropic(obj["usage"]))...)
 	}
 	return evs
+}
+
+// terminal emits the frames that close an Anthropic turn.
+func (s *chatToMsgState) terminal(finish string, usage map[string]any) []stream.Event {
+	s.closed = true
+	return []stream.Event{
+		{Event: "message_delta", Data: mustJSON(map[string]any{
+			"type":  "message_delta",
+			"delta": map[string]any{"stop_reason": finishToStopReason(finish), "stop_sequence": nil},
+			"usage": usage,
+		})},
+		{Event: "message_stop", Data: mustJSON(map[string]any{"type": "message_stop"})},
+	}
 }
 
 func (s *chatToMsgState) ensureBlock(typ string, block map[string]any) []stream.Event {
@@ -262,13 +282,13 @@ func (s *chatToMsgState) finish() []stream.Event {
 	var evs []stream.Event
 	evs = append(evs, s.closeBlock()...)
 	if s.started {
-		evs = append(evs, stream.Event{Event: "message_delta", Data: mustJSON(map[string]any{
-			"type":  "message_delta",
-			"delta": map[string]any{"stop_reason": "end_turn", "stop_sequence": nil},
-			"usage": map[string]any{"input_tokens": 0, "output_tokens": 0},
-		})})
-		evs = append(evs, stream.Event{Event: "message_stop", Data: mustJSON(map[string]any{"type": "message_stop"})})
-		s.closed = true
+		// A held stop_reason whose usage never arrived still closes the turn;
+		// the counts it would have carried are simply absent.
+		finish := "end_turn"
+		if s.pendingStop != "" {
+			finish = s.pendingStop
+		}
+		evs = append(evs, s.terminal(finish, map[string]any{"input_tokens": 0, "output_tokens": 0})...)
 	}
 	return evs
 }

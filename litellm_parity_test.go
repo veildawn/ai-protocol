@@ -438,3 +438,37 @@ func TestResponsesToChatKeepsCustomToolCall(t *testing.T) {
 		t.Fatalf("tool call = %#v", fn)
 	}
 }
+
+// Under stream_options.include_usage the usage rides a chunk of its own, after
+// the finish_reason. A fold that closes on the finish chunk reports zero
+// tokens for a turn that has a real count.
+func TestChatUsageTailIsFoldedIntoTheTerminal(t *testing.T) {
+	src := strings.Join([]string{
+		`data: {"id":"c","model":"m","choices":[{"delta":{"content":"hi"}}]}`,
+		``,
+		`data: {"id":"c","choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		``,
+		`data: {"id":"c","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}`,
+		``,
+	}, "\n")
+
+	var toMessages bytes.Buffer
+	if _, err := PipeStream(Chat, Messages, &toMessages, strings.NewReader(src), StreamOpts{Model: "m"}); err != nil {
+		t.Fatal(err)
+	}
+	out := toMessages.String()
+	if !strings.Contains(out, `"input_tokens":10`) || !strings.Contains(out, `"output_tokens":5`) {
+		t.Fatalf("usage lost folding to Messages:\n%s", out)
+	}
+	if n := strings.Count(out, "event: message_stop"); n != 1 {
+		t.Fatalf("message_stop events = %d, want 1\n%s", n, out)
+	}
+
+	var toResponses bytes.Buffer
+	if _, err := PipeStream(Chat, Responses, &toResponses, strings.NewReader(src), StreamOpts{Model: "m"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(toResponses.String(), `"input_tokens":10`) {
+		t.Fatalf("usage lost folding to Responses:\n%s", toResponses.String())
+	}
+}
