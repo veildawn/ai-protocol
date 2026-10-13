@@ -792,3 +792,26 @@ func TestChatToMessagesKeepsTopLevelCacheControl(t *testing.T) {
 		t.Fatalf("cache_control = %#v, want it carried through", m["cache_control"])
 	}
 }
+
+// A Messages turn with thinking enabled needs room for the thinking plus the
+// answer, so a request that named no ceiling gets one derived from the budget
+// rather than none at all. Without thinking there is nothing to derive from.
+func TestChatToMessagesDerivesMaxTokensFromThinking(t *testing.T) {
+	body := `{"model":"m","messages":[{"role":"user","content":"x"}],"thinking":{"type":"enabled","budget_tokens":2048}}`
+	out, err := ConvertRequest(Chat, Messages, []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out.Body, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["max_tokens"] != float64(2048+4096) {
+		t.Fatalf("max_tokens = %#v, want the budget plus the default answer room", m["max_tokens"])
+	}
+
+	// No thinking budget to derive from: the host still supplies the value.
+	if _, err := ConvertRequest(Chat, Messages, []byte(`{"model":"m","messages":[{"role":"user","content":"x"}]}`)); err == nil {
+		t.Fatal("a fold with nothing to derive max_tokens from must report it")
+	}
+}

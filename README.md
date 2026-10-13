@@ -23,7 +23,8 @@ them.
 - Explicit error semantics: `UnsupportedParamError` for a parameter the target
   dialect cannot carry, `MissingRequiredFieldError` for a field the target
   dialect requires that the caller declined to supply (Messages folds and
-  `max_tokens`), `ConversionError` for a body it cannot read, and
+  `max_tokens`, when the request carries no thinking budget to derive it from),
+  `ConversionError` for a body it cannot read, and
   `StreamResult` (`Terminal`/`Truncated`/`InBandErr`) for how a stream ended.
 - `stream.Framer` incrementally yields complete SSE events from split reads;
   `stream.ClassifyEvent` reports per-event public-protocol facts (prelude,
@@ -60,7 +61,9 @@ A host supplies **policy** through the seams on the options types — `Flush` fo
 write-through, `OnEvent` for rewriting decoded stream events,
 `MaxTokensFallback` for the value of a required field a fold cannot derive —
 and the policy itself stays in the host. Nothing in this library has an opinion
-about what a hook does or what a supplied value should be.
+about what a hook does or what a supplied value should be. A fold into Messages
+derives `max_tokens` from a thinking budget when the request names no ceiling,
+and otherwise asks the host for the value rather than inventing one.
 
 ## Usage
 

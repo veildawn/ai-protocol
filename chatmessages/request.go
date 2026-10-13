@@ -138,6 +138,14 @@ func ChatToMessages(body map[string]any, dropParams bool) (map[string]any, error
 			out["output_format"] = mapped
 		}
 	}
+	// A Messages turn with thinking enabled needs room for the thinking plus
+	// the answer, so a request that named no ceiling gets one derived from the
+	// thinking budget rather than none at all.
+	if _, hasMax := out["max_tokens"]; !hasMax {
+		if budget, ok := thinkingBudget(out["thinking"]); ok {
+			out["max_tokens"] = budget + defaultMaxTokens
+		}
+	}
 	copyIf(body, out, "context_management")
 	copyIf(body, out, "speed")
 	// A top-level cache_control marks the request for automatic prompt caching.
@@ -270,6 +278,19 @@ func mapStopSequences(v any, drop bool) []any {
 	default:
 		return []any{v}
 	}
+}
+
+// defaultMaxTokens is the answer budget added to a thinking budget when a
+// request asks for thinking but names no output ceiling.
+const defaultMaxTokens = 4096
+
+// thinkingBudget reads the budget_tokens of an enabled thinking param.
+func thinkingBudget(thinking any) (int, bool) {
+	m, ok := jsonx.AsMap(thinking)
+	if !ok || jsonx.GetString(m, "type") != "enabled" {
+		return 0, false
+	}
+	return jsonx.Int(m["budget_tokens"])
 }
 
 // reasoningEffortString reads a reasoning_effort value, which arrives either as
