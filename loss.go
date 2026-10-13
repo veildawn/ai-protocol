@@ -61,8 +61,13 @@ func StaticLosses(from, to Dialect) LossSet {
 	out := LossSet{}.Add(LossLogitBias, LossLogprobs, LossMultiChoice, LossToolArguments, LossUnknownContent)
 	switch {
 	case src == Chat && dst == Messages:
-		return out.Add(LossSeed, LossPenaltyControls, LossFileReference, LossStructuredOutput)
+		// Structured output is NOT listed for chat->messages: both forms fold
+		// (json_schema and json_object become output_format), matching the
+		// reference, which keeps response_format for Anthropic targets.
+		return out.Add(LossSeed, LossPenaltyControls, LossFileReference)
 	case src == Responses && dst == Messages:
+		// Only the json_object body form is lost here (the fold has a branch
+		// for json_schema alone); see bodyHasStructuredOutput.
 		return out.Add(LossFileReference, LossStructuredOutput)
 	default:
 		return out
@@ -187,7 +192,12 @@ func responsesHasFileReference(value any) bool {
 		}
 		for _, blockRaw := range blocks {
 			block, _ := blockRaw.(map[string]any)
-			if block != nil && block["type"] == "input_file" && strings.TrimSpace(stringField(block["file_id"])) != "" {
+			if block == nil || block["type"] != "input_file" {
+				continue
+			}
+			// The fold drops every input_file part, so both spellings are a loss:
+			// a referenced file_id and an inline file_data payload alike.
+			if strings.TrimSpace(stringField(block["file_id"])) != "" || strings.TrimSpace(stringField(block["file_data"])) != "" {
 				return true
 			}
 		}
@@ -198,18 +208,36 @@ func responsesHasFileReference(value any) bool {
 func bodyHasStructuredOutput(payload map[string]any, dialect Dialect) bool {
 	switch dialect {
 	case Chat:
-		rf, _ := payload["response_format"].(map[string]any)
-		return rf != nil && (rf["type"] == "json_object" || rf["type"] == "json_schema")
+		// Both response_format forms fold to output_format, so neither body
+		// loses structured output; this branch reports nothing.
+		return false
 	case Responses:
+		// A text.format json_schema folds to output_format and survives;
+		// json_object has no branch in the fold and is dropped, so only that
+		// form is a loss.
 		text, _ := payload["text"].(map[string]any)
 		format, _ := text["format"].(map[string]any)
-		return format != nil && (format["type"] == "json_object" || format["type"] == "json_schema")
+		return format != nil && format["type"] == "json_object"
 	default:
 		return false
 	}
 }
 
 func bodyHasInvalidToolArguments(payload map[string]any, dialect Dialect) bool {
+	// Empty, missing, or whitespace-only arguments fold to input:{} — the
+	// reference does the same — so only a value that is present AND neither a
+	// JSON object nor parseable JSON is a loss.
+	isInvalid := func(arguments string) bool {
+		if strings.TrimSpace(arguments) == "" {
+			return false
+		}
+		var value any
+		if err := json.Unmarshal([]byte(arguments), &value); err != nil {
+			return true
+		}
+		_, ok := value.(map[string]any)
+		return !ok && value != nil
+	}
 	switch dialect {
 	case Chat:
 		messages, _ := payload["messages"].([]any)
@@ -225,11 +253,7 @@ func bodyHasInvalidToolArguments(payload map[string]any, dialect Dialect) bool {
 				if fn == nil {
 					continue
 				}
-				var value any
-				if err := json.Unmarshal([]byte(stringField(fn["arguments"])), &value); err != nil {
-					return true
-				}
-				if _, ok := value.(map[string]any); !ok && value != nil {
+				if isInvalid(stringField(fn["arguments"])) {
 					return true
 				}
 			}
@@ -241,11 +265,7 @@ func bodyHasInvalidToolArguments(payload map[string]any, dialect Dialect) bool {
 			if item == nil || item["type"] != "function_call" {
 				continue
 			}
-			var value any
-			if err := json.Unmarshal([]byte(stringField(item["arguments"])), &value); err != nil {
-				return true
-			}
-			if _, ok := value.(map[string]any); !ok && value != nil {
+			if isInvalid(stringField(item["arguments"])) {
 				return true
 			}
 		}

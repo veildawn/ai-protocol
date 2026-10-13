@@ -12,9 +12,12 @@ import (
 // should retain them separately: Event intentionally contains only protocol
 // fields, not id/retry or the original line endings.
 type Framer struct {
-	line  []byte
-	event string
-	data  []string
+	line []byte
+	// crPending records that the last chunk ended with \r, which may yet turn
+	// out to be the first half of a CRLF ending split across chunks.
+	crPending bool
+	event     string
+	data      []string
 }
 
 // Feed adds a chunk and calls fn for each complete event in it. The partial
@@ -22,26 +25,63 @@ type Framer struct {
 // per-line limit is enforced before appending more bytes.
 func (f *Framer) Feed(p []byte, fn func(Event) error) error {
 	for len(p) > 0 {
+		if f.crPending {
+			// The previous chunk ended in \r. An \n now completes one CRLF
+			// ending; anything else leaves that \r as the lone-CR ending it
+			// already was. Either way the line it ended stays ended.
+			f.crPending = false
+			if p[0] == '\n' {
+				p = p[1:]
+				continue
+			}
+		}
 		nl := bytes.IndexByte(p, '\n')
-		if nl < 0 {
+		cr := bytes.IndexByte(p, '\r')
+		// A line ends with \n, \r\n, or a lone \r — the SSE grammar accepts
+		// all three, and so does the reference's decoder. The earliest
+		// terminator wins.
+		end, skip := nl, 1
+		if cr >= 0 && (nl < 0 || cr < nl) {
+			if cr == len(p)-1 {
+				// A trailing \r may be half of a CRLF split across chunks:
+				// the line's content is settled either way, so process it and
+				// hold only the ending decision.
+				if err := f.takeLine(p[:cr], fn); err != nil {
+					return err
+				}
+				f.crPending = true
+				return nil
+			}
+			end = cr
+			if p[cr+1] == '\n' {
+				skip = 2
+			}
+		}
+		if end < 0 {
 			if len(f.line)+len(p) > maxEventBytes {
 				return fmt.Errorf("SSE line exceeds %d bytes", maxEventBytes)
 			}
 			f.line = append(f.line, p...)
 			return nil
 		}
-		if len(f.line)+nl > maxEventBytes {
-			return fmt.Errorf("SSE line exceeds %d bytes", maxEventBytes)
-		}
-		f.line = append(f.line, p[:nl]...)
-		if err := f.processLine(f.line, fn); err != nil {
-			f.line = f.line[:0]
+		if err := f.takeLine(p[:end], fn); err != nil {
 			return err
 		}
-		f.line = f.line[:0]
-		p = p[nl+1:]
+		p = p[end+skip:]
 	}
 	return nil
+}
+
+// takeLine appends content to the pending line and processes the result as one
+// complete line.
+func (f *Framer) takeLine(content []byte, fn func(Event) error) error {
+	if len(f.line)+len(content) > maxEventBytes {
+		return fmt.Errorf("SSE line exceeds %d bytes", maxEventBytes)
+	}
+	f.line = append(f.line, content...)
+	err := f.processLine(f.line, fn)
+	f.line = f.line[:0]
+	return err
 }
 
 // Finish processes an unterminated final line and dispatches any event still

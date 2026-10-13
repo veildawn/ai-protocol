@@ -27,7 +27,11 @@ func (o *Observer) Feed(ev Event) error {
 		return nil
 	}
 	facts := ClassifyEvent("", ev)
-	if facts.Terminal {
+	// Several Chat vendors close the turn on the usage chunk instead of
+	// [DONE]: the counts arrive when the turn is over, so the stream that ends
+	// on them is closed, not truncated. The bare-EOF contract is untouched —
+	// a stream that ends with no frame at all is still a truncation.
+	if facts.Terminal || (facts.Kind == EventPrelude && chatUsageClose(ev)) {
 		o.Result.Terminal = true
 	}
 	if facts.Kind == EventFailure {

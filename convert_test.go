@@ -54,7 +54,8 @@ func TestChatToMessagesPlainText(t *testing.T) {
 	if out["model"] != "claude-sonnet-4-5" {
 		t.Fatalf("model=%v", out["model"])
 	}
-	if out["system"] != "be brief" {
+	sys := out["system"].([]any)
+	if len(sys) != 1 || jsonMap(sys[0].(map[string]any))["text"] != "be brief" {
 		t.Fatalf("system=%v", out["system"])
 	}
 	msgs := out["messages"].([]any)
@@ -808,8 +809,10 @@ func TestMessagesToChatToolResultImage(t *testing.T) {
 	}
 }
 
-// A tool_result that returned only text keeps the flat string every chat
-// upstream already accepted, so prompt prefixes stay stable.
+// A tool_result whose parts are one text keeps the flat string every chat
+// upstream already accepted, so prompt prefixes stay stable. More than one
+// part rides as the parts array (litellm v1.100.1 adapters/transformation.py
+// :1218-1257 collapses only the single-text case to a string).
 func TestMessagesToChatToolResultTextStaysString(t *testing.T) {
 	in := jsonMap{
 		"model": "m",
@@ -833,8 +836,37 @@ func TestMessagesToChatToolResultTextStaysString(t *testing.T) {
 	}
 	out := convertReq(t, Messages, Chat, in)
 	tool := out["messages"].([]any)[1].(map[string]any)
-	if got, ok := tool["content"].(string); !ok || got != "first\nsecond" {
-		t.Fatalf("content = %#v, want the joined string", tool["content"])
+	parts, ok := tool["content"].([]any)
+	if !ok || len(parts) != 2 {
+		t.Fatalf("content = %#v, want two text parts", tool["content"])
+	}
+	if parts[0].(map[string]any)["text"] != "first" || parts[1].(map[string]any)["text"] != "second" {
+		t.Fatalf("content = %#v, want both texts kept apart", parts)
+	}
+
+	single := jsonMap{
+		"model": "m",
+		"messages": []any{
+			map[string]any{
+				"role": "assistant",
+				"content": []any{
+					map[string]any{"type": "tool_use", "id": "t1", "name": "read", "input": map[string]any{}},
+				},
+			},
+			map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "tool_result", "tool_use_id": "t1", "content": []any{
+						map[string]any{"type": "text", "text": "only"},
+					}},
+				},
+			},
+		},
+	}
+	out = convertReq(t, Messages, Chat, single)
+	tool = out["messages"].([]any)[1].(map[string]any)
+	if got, ok := tool["content"].(string); !ok || got != "only" {
+		t.Fatalf("single text content = %#v, want the flat string", tool["content"])
 	}
 }
 
@@ -933,8 +965,11 @@ func TestMessagesToChatUserDocumentKept(t *testing.T) {
 }
 
 // A redacted_thinking block carries its payload in `data`, not `signature`.
-// The non-streaming response fold used to read only `signature`, emitting an
-// empty reasoning item and losing the opaque bytes the next turn replays.
+// The reference re-encodes every block with opaque bytes as the compact JSON
+// array encrypted_content is on the wire (litellm v1.100.1
+// responses/litellm_completion_transformation/transformation.py:2356
+// _encode_thinking_blocks), so the opaque bytes the next turn replays survive
+// the fold inside that array — a bare `data` string would not decode back.
 func TestMessagesResponseToResponsesRedactedThinkingKeepsData(t *testing.T) {
 	body := `{"id":"m1","type":"message","role":"assistant","content":[{"type":"redacted_thinking","data":"OPAQUE"}]}`
 	out, err := ConvertResponse(Messages, Responses, []byte(body))
@@ -949,8 +984,13 @@ func TestMessagesResponseToResponsesRedactedThinkingKeepsData(t *testing.T) {
 	if item["type"] != "reasoning" {
 		t.Fatalf("item = %#v", item)
 	}
-	if item["encrypted_content"] != "OPAQUE" {
-		t.Fatalf("encrypted_content = %v, want OPAQUE", item["encrypted_content"])
+	enc, _ := item["encrypted_content"].(string)
+	var blocks []map[string]any
+	if err := json.Unmarshal([]byte(enc), &blocks); err != nil {
+		t.Fatalf("encrypted_content = %q, want the array-encoded redacted block: %v", enc, err)
+	}
+	if len(blocks) != 1 || blocks[0]["type"] != "redacted_thinking" || blocks[0]["data"] != "OPAQUE" {
+		t.Fatalf("encrypted blocks = %#v, want [{redacted_thinking OPAQUE}]", blocks)
 	}
 	if s, _ := item["summary"].([]any); len(s) != 0 {
 		t.Fatalf("redacted block should carry no summary text: %#v", s)
@@ -1141,8 +1181,14 @@ func TestResponsesToMessagesKeepsRefusalText(t *testing.T) {
 	}
 }
 
-// A Messages safeguard refusal (stop_reason "refusal") is not a clean stop;
-// the Responses spelling for it is a content filter.
+// A Messages safeguard refusal (stop_reason "refusal") is not a clean stop:
+// the reference maps it refusal → chat content_filter → Responses status
+// incomplete (litellm v1.100.1 core_helpers.py:157 and
+// responses/litellm_completion_transformation/transformation.py:2105), but it
+// leaves incomplete_details null on this chain — the response builder only
+// copies the field off the chat completion (transformation.py:2233), which the
+// Anthropic adapter never sets. Synthesizing a reason the reference does not
+// emit is what this test used to pin.
 func TestMessagesResponseRefusalStopReason(t *testing.T) {
 	body := `{"id":"m1","type":"message","role":"assistant","stop_reason":"refusal","content":[{"type":"text","text":"no"}]}`
 	out, err := ConvertResponse(Messages, Responses, []byte(body))
@@ -1156,8 +1202,7 @@ func TestMessagesResponseRefusalStopReason(t *testing.T) {
 	if m["status"] != "incomplete" {
 		t.Fatalf("status = %v, want incomplete", m["status"])
 	}
-	details, _ := m["incomplete_details"].(map[string]any)
-	if details["reason"] != "content_filter" {
-		t.Fatalf("reason = %#v, want content_filter", m["incomplete_details"])
+	if details, has := m["incomplete_details"]; has && details != nil {
+		t.Fatalf("incomplete_details = %#v, want absent — the reference leaves it null on this chain", details)
 	}
 }

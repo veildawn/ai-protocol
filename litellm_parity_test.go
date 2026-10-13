@@ -149,8 +149,15 @@ func TestChatToMessagesMergesConsecutiveRoles(t *testing.T) {
 	if len(msgs) != 1 {
 		t.Fatalf("messages = %#v, want one merged turn", msgs)
 	}
-	if got := msgs[0].(map[string]any)["content"]; got != "ab" {
-		t.Fatalf("content = %#v, want the joined text", got)
+	// Each merged turn keeps its own text block (litellm v1.100.1
+	// factory.py:2453-2477 appends one text block per message); joining the
+	// strings would read as one glued word the caller never wrote.
+	blocks, ok := msgs[0].(map[string]any)["content"].([]any)
+	if !ok || len(blocks) != 2 {
+		t.Fatalf("content = %#v, want two text blocks", msgs[0].(map[string]any)["content"])
+	}
+	if blocks[0].(map[string]any)["text"] != "a" || blocks[1].(map[string]any)["text"] != "b" {
+		t.Fatalf("content = %#v, want the two turns' texts kept apart", blocks)
 	}
 }
 
@@ -347,7 +354,12 @@ func TestResponsesToMessagesRendersStructuredToolOutput(t *testing.T) {
 }
 
 // A signed thinking block's signature has to reach the target, or the turn
-// cannot be replayed.
+// cannot be replayed. The reference carries it as litellm's array-encoded
+// encrypted_content (v1.100.1
+// responses/litellm_completion_transformation/transformation.py:2356
+// _encode_thinking_blocks re-encodes every block with a signature as a compact
+// JSON array), so the signature survives inside the array — not as the bare
+// string this test used to pin.
 func TestChatResponseToResponsesKeepsThinkingSignature(t *testing.T) {
 	body := `{"id":"c1","model":"m","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"hi","thinking_blocks":[{"type":"thinking","thinking":"why","signature":"SIG"}]}}]}`
 	out, err := ConvertResponse(Chat, Responses, []byte(body))
@@ -361,8 +373,13 @@ func TestChatResponseToResponsesKeepsThinkingSignature(t *testing.T) {
 	for _, item := range m["output"].([]any) {
 		im := item.(map[string]any)
 		if im["type"] == "reasoning" {
-			if im["encrypted_content"] != "SIG" {
-				t.Fatalf("reasoning item = %#v, want the signature", im)
+			enc, _ := im["encrypted_content"].(string)
+			var blocks []map[string]any
+			if err := json.Unmarshal([]byte(enc), &blocks); err != nil {
+				t.Fatalf("encrypted_content = %q, want the array-encoded blocks: %v", enc, err)
+			}
+			if len(blocks) != 1 || blocks[0]["type"] != "thinking" || blocks[0]["signature"] != "SIG" {
+				t.Fatalf("encrypted blocks = %#v, want the signed thinking block", blocks)
 			}
 			return
 		}
@@ -501,10 +518,12 @@ func TestToolChoiceShapeMatchesTheReference(t *testing.T) {
 }
 
 // A Responses choice that names no tool means "any tool", which the chat wire
-// spells "required".
+// spells "required" — when the request declares a tool to pick. With no tools
+// at all, the reference drops the pairing entirely rather than leaving a
+// tool_choice that names nothing.
 func TestResponsesToolChoiceWithoutNameBecomesRequired(t *testing.T) {
 	for _, in := range []string{`{"type":"function"}`, `{"type":"tool"}`, `{"type":"any"}`} {
-		body := `{"model":"m","input":"x","tool_choice":` + in + `}`
+		body := `{"model":"m","input":"x","tools":[{"type":"function","name":"f","parameters":{"type":"object"}}],"tool_choice":` + in + `}`
 		out, err := ConvertRequest(Responses, Chat, []byte(body))
 		if err != nil {
 			t.Fatal(err)
@@ -516,6 +535,19 @@ func TestResponsesToolChoiceWithoutNameBecomesRequired(t *testing.T) {
 		if m["tool_choice"] != "required" {
 			t.Fatalf("tool_choice %s -> %v, want required", in, m["tool_choice"])
 		}
+	}
+	// No tools declared: the key folds away altogether.
+	body := `{"model":"m","input":"x","tool_choice":{"type":"function"}}`
+	out, err := ConvertRequest(Responses, Chat, []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out.Body, &m); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := m["tool_choice"]; present {
+		t.Fatalf("tool_choice without tools = %#v, want the key gone", m["tool_choice"])
 	}
 }
 
@@ -662,7 +694,25 @@ func TestChatToMessagesCoercesToolSchema(t *testing.T) {
 // An Anthropic-native tool owns a reserved name the provider defines; rewriting
 // it into a function tool would drop the type that names it.
 func TestMessagesToChatKeepsHostedTools(t *testing.T) {
-	for _, hosted := range []string{"web_search_20260209", "bash_20250124", "text_editor_20250728"} {
+	// web_search is the exception: litellm v1.100.1 (transformation.py:987-993)
+	// folds it out of tools into the chat-native web_search_options, so it does
+	// not ride the tools list; the other hosted tools stay as they stand.
+	body := `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":"x"}],"tools":[{"type":"web_search_20260209","name":"t"}]}`
+	out, err := ConvertRequest(Messages, Chat, []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wm map[string]any
+	if err := json.Unmarshal(out.Body, &wm); err != nil {
+		t.Fatal(err)
+	}
+	if tools, ok := wm["tools"].([]any); ok && len(tools) > 0 {
+		t.Fatalf("web_search tool stayed in tools: %#v", tools)
+	}
+	if wso, ok := wm["web_search_options"].(map[string]any); !ok || len(wso) != 0 {
+		t.Fatalf("web_search_options = %#v, want {}", wm["web_search_options"])
+	}
+	for _, hosted := range []string{"bash_20250124", "text_editor_20250728"} {
 		body := `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":"x"}],"tools":[{"type":"` + hosted + `","name":"t"}]}`
 		out, err := ConvertRequest(Messages, Chat, []byte(body))
 		if err != nil {
@@ -679,28 +729,35 @@ func TestMessagesToChatKeepsHostedTools(t *testing.T) {
 	}
 }
 
-// A Responses-only tool has no other dialect's equivalent, and forwarding it
-// makes the target reject the request for a missing function. It is dropped.
+// The reference drops exactly the Responses tool types with no chat spelling
+// — computer_use, image_generation, shell — and passes the rest (mcp,
+// previews) through unchanged. The Messages fold still drops the dated hosted
+// tools as Responses-only: each fold keeps what its own target reads.
 func TestResponsesOnlyToolsAreDropped(t *testing.T) {
 	body := `{"model":"m","input":"x","tools":[{"type":"computer_use_preview"},{"type":"image_generation"},{"type":"shell"}]}`
-	for _, to := range []Dialect{Chat, Messages} {
-		var out Converted
-		var err error
-		if to == Messages {
-			out, err = ConvertRequestWith(Responses, to, []byte(body), ConvertOptions{MaxTokensFallback: 1})
-		} else {
-			out, err = ConvertRequest(Responses, to, []byte(body))
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-		var m map[string]any
-		if err := json.Unmarshal(out.Body, &m); err != nil {
-			t.Fatal(err)
-		}
-		if tools, ok := m["tools"].([]any); ok && len(tools) > 0 {
-			t.Fatalf("folding to %s kept %#v", to, tools)
-		}
+
+	out, err := ConvertRequest(Responses, Chat, []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out.Body, &m); err != nil {
+		t.Fatal(err)
+	}
+	tools := m["tools"].([]any)
+	if len(tools) != 1 || tools[0].(map[string]any)["type"] != "computer_use_preview" {
+		t.Fatalf("folding to Chat = %#v, want the preview passed through", tools)
+	}
+
+	out, err = ConvertRequestWith(Responses, Messages, []byte(body), ConvertOptions{MaxTokensFallback: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(out.Body, &m); err != nil {
+		t.Fatal(err)
+	}
+	if tools, ok := m["tools"].([]any); ok && len(tools) > 0 {
+		t.Fatalf("folding to Messages kept %#v", tools)
 	}
 }
 

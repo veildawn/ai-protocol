@@ -235,8 +235,15 @@ func TestChatToResponsesCleanFinishStaysCompleted(t *testing.T) {
 	}
 }
 
-// The Messages dialect's ceiling cut is stop_reason max_tokens. It folds into
-// the same non-success terminal, for the same reason.
+// The Messages dialect's ceiling cut is stop_reason max_tokens. On this fold
+// the reference's chat→responses bridge closes EVERY turn with
+// response.completed (litellm v1.100.1
+// responses/litellm_completion_transformation/streaming_iterator.py:1165
+// _emit_response_completed_event — it has no incomplete variant); a ceiling
+// cut says so in the embedded response.status, and incomplete_details stays
+// null because the builder only copies it off the chat completion
+// (transformation.py:2233), which the Anthropic path never sets. The turn is
+// still not a completion — the status the client reads must say incomplete.
 func TestMessagesToResponsesCeilingCutIsIncompleteWithReason(t *testing.T) {
 	src := messagesOpen +
 		`event: message_delta` + "\n" + `data: {"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":65536}}` + "\n\n" +
@@ -245,10 +252,16 @@ func TestMessagesToResponsesCeilingCutIsIncompleteWithReason(t *testing.T) {
 	if !res.Terminal || res.Truncated {
 		t.Fatalf("result=%+v", res)
 	}
-	if !strings.Contains(out, "event: response.incomplete") {
-		t.Fatalf("max_tokens stop did not close as response.incomplete:\n%s", out)
+	if strings.Contains(out, "event: response.incomplete") {
+		t.Fatalf("ceiling cut closed as response.incomplete:\n%s", out)
 	}
-	if !strings.Contains(out, `"incomplete_details":{"reason":"max_output_tokens"}`) {
-		t.Fatalf("max_tokens stop carried no reason:\n%s", out)
+	if !strings.Contains(out, `event: response.completed`) {
+		t.Fatalf("ceiling cut did not close with response.completed:\n%s", out)
+	}
+	if !strings.Contains(out, `"status":"incomplete"`) {
+		t.Fatalf("terminal response.status did not say incomplete:\n%s", out)
+	}
+	if strings.Contains(out, "incomplete_details") {
+		t.Fatalf("ceiling cut carried an incomplete_details the reference leaves null:\n%s", out)
 	}
 }

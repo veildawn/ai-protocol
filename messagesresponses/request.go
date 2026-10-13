@@ -2,6 +2,7 @@ package messagesresponses
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 
 	"github.com/veildawn/ai-protocol/internal/jsonx"
@@ -15,30 +16,48 @@ func MessagesToResponses(body map[string]any) (map[string]any, error) {
 	msgs, _ := jsonx.AsSlice(body["messages"])
 	input := messagesToInput(msgs)
 	system := body["system"]
-	if s, ok := system.(string); ok && s != "" {
+	// A system list that carries a prompt_cache_breakpoint cannot fold into
+	// instructions — the marker has nowhere to live there — so it rides a
+	// developer message ahead of the input, the part keeping its own marker.
+	var developerParts []any
+	if list, ok := jsonx.AsSlice(system); ok && hasCacheBreakpoint(list) {
+		developerParts = systemTextParts(list)
+	}
+	if len(developerParts) > 0 {
+		input = append([]any{map[string]any{
+			"type":    "message",
+			"role":    "developer",
+			"content": developerParts,
+		}}, input...)
+	} else if s, ok := system.(string); ok && s != "" {
 		out["instructions"] = s
-	} else if list, ok := jsonx.AsSlice(system); ok {
+	} else if list, ok := jsonx.AsSlice(system); ok && len(list) > 0 {
 		var texts []string
 		for _, b := range list {
 			if bm, ok := jsonx.AsMap(b); ok && jsonx.GetString(bm, "type") == "text" {
-				texts = append(texts, jsonx.GetString(bm, "text"))
+				if t := jsonx.GetString(bm, "text"); t != "" {
+					texts = append(texts, t)
+				}
 			}
 		}
-		if len(texts) > 0 {
-			out["instructions"] = strings.Join(texts, "\n")
-		}
+		out["instructions"] = strings.Join(texts, "\n")
 	}
 	out["input"] = input
-	if v, ok := body["max_tokens"]; ok {
+	// The reference gates these on truthiness, not presence: a zero ceiling, an
+	// empty tool list, an empty choice object or a false stream omit the key
+	// rather than spell out a value the target would read as a setting.
+	if v, ok := body["max_tokens"]; ok && truthyValue(v) {
 		out["max_output_tokens"] = v
 	}
 	copyIf(body, out, "temperature")
 	copyIf(body, out, "top_p")
-	copyIf(body, out, "stream")
-	if tools, ok := body["tools"]; ok {
+	if s, ok := body["stream"]; ok && truthyValue(s) {
+		out["stream"] = true
+	}
+	if tools, ok := body["tools"]; ok && truthyValue(tools) {
 		out["tools"] = toolsToResponses(tools)
 	}
-	if tc, ok := body["tool_choice"]; ok {
+	if tc, ok := body["tool_choice"]; ok && truthyValue(tc) {
 		out["tool_choice"] = toolChoiceToResponses(tc)
 	}
 	if thinking, ok := jsonx.AsMap(body["thinking"]); ok {
@@ -53,7 +72,9 @@ func MessagesToResponses(body map[string]any) (map[string]any, error) {
 		}
 	}
 	if fm, ok := jsonx.AsMap(of); ok && jsonx.GetString(fm, "type") == "json_schema" {
-		if schema, ok := fm["schema"]; ok && schema != nil {
+		// An empty schema object is falsy to the reference: no text.format is
+		// set, rather than one wrapping a schema with nothing in it.
+		if schema, ok := jsonx.AsMap(fm["schema"]); ok && len(schema) > 0 {
 			strict := fm["strict"]
 			if strict == nil {
 				strict = false
@@ -72,13 +93,16 @@ func MessagesToResponses(body map[string]any) (map[string]any, error) {
 		}
 	}
 	if md, ok := jsonx.AsMap(body["metadata"]); ok {
-		if uid := jsonx.GetString(md, "user_id"); uid != "" {
-			trunc := uid
-			if len(trunc) > 64 {
-				trunc = trunc[:64]
+		if v, present := md["user_id"]; present {
+			// The key's presence alone sets user, rendered the way the
+			// reference's str() renders it — null becomes "None" — and
+			// truncated to 64 characters, not bytes. The cache key is only
+			// pinned for an id with something in it.
+			user := truncateRunes(pyStr(v), 64)
+			out["user"] = user
+			if v != nil && user != "" {
+				out["prompt_cache_key"] = user
 			}
-			out["user"] = trunc
-			out["prompt_cache_key"] = trunc
 		}
 	}
 	// stop_sequences, top_k and speed have no Messages counterpart and are
@@ -131,16 +155,10 @@ func ResponsesToMessages(body map[string]any) (map[string]any, error) {
 				"input": input,
 			})
 			stop = "tool_use"
-		case "custom_tool_call":
-			// A custom call's freeform payload is not JSON, so it cannot become
-			// a tool_use input object; the text rides a text block so the call
-			// the model made is not lost.
-			content = append(content, map[string]any{
-				"type": "text",
-				"text": jsonx.GetString(m, "input"),
-			})
-			stop = "tool_use"
 		}
+		// custom_tool_call items are dropped: the reference's item loop handles
+		// message, reasoning and function_call only, and a custom call's
+		// freeform payload has no Messages counterpart to fold into.
 	}
 	if jsonx.GetString(body, "status") == "incomplete" {
 		stop = "max_tokens"
@@ -170,6 +188,57 @@ func copyIf(src, dst map[string]any, key string) {
 	}
 }
 
+// truthyValue reports the truthiness of a decoded JSON value the way the
+// reference's `if value:` gates read it: nil, false, zero, an empty string,
+// list or object are falsy, everything else truthy.
+func truthyValue(v any) bool {
+	switch t := v.(type) {
+	case nil:
+		return false
+	case bool:
+		return t
+	case json.Number:
+		f, err := t.Float64()
+		return err != nil || f != 0
+	case string:
+		return t != ""
+	case []any:
+		return len(t) > 0
+	case map[string]any:
+		return len(t) > 0
+	default:
+		return true
+	}
+}
+
+// pyStr renders a decoded JSON value the way the reference's str() renders the
+// values these folds meet: null becomes "None", a bool renders capitalized,
+// strings and numbers render as themselves.
+func pyStr(v any) string {
+	switch t := v.(type) {
+	case nil:
+		return "None"
+	case bool:
+		if t {
+			return "True"
+		}
+		return "False"
+	default:
+		return jsonx.String(v)
+	}
+}
+
+// truncateRunes keeps the first n characters, not bytes: the reference slices
+// Python strings by code point, and a byte cut can split a multi-byte rune in
+// half.
+func truncateRunes(s string, n int) string {
+	runes := []rune(s)
+	if len(runes) <= n {
+		return s
+	}
+	return string(runes[:n])
+}
+
 func first(a, b string) string {
 	if a != "" {
 		return a
@@ -195,12 +264,25 @@ func messagesToInput(msgs []any) []any {
 		}
 		role := jsonx.GetString(m, "role")
 		if role == "system" {
-			text := contentText(m["content"])
-			if text != "" {
+			if s, ok := m["content"].(string); ok {
+				if s != "" {
+					input = append(input, map[string]any{
+						"type":    "message",
+						"role":    "system",
+						"content": []any{map[string]any{"type": "input_text", "text": s}},
+					})
+				}
+				continue
+			}
+			list, _ := jsonx.AsSlice(m["content"])
+			// Each text block is its own input_text part, so a block's
+			// prompt_cache_breakpoint stays on the part it belongs to; a
+			// non-text block carries nothing foldable here and is skipped.
+			if parts := systemTextParts(list); len(parts) > 0 {
 				input = append(input, map[string]any{
 					"type":    "message",
 					"role":    "system",
-					"content": []any{map[string]any{"type": "input_text", "text": text}},
+					"content": parts,
 				})
 			}
 			continue
@@ -274,68 +356,96 @@ func messagesToInput(msgs []any) []any {
 				continue
 			}
 			list, _ := jsonx.AsSlice(content)
-			var textParts []any
-			flushText := func() {
-				if len(textParts) == 0 {
-					return
-				}
-				input = append(input, map[string]any{"type": "message", "role": "assistant", "content": textParts})
-				textParts = nil
-			}
+			var blocks []map[string]any
 			for _, b := range list {
-				bm, ok := jsonx.AsMap(b)
-				if !ok {
-					continue
+				if bm, ok := jsonx.AsMap(b); ok {
+					blocks = append(blocks, bm)
 				}
-				switch jsonx.GetString(bm, "type") {
-				case "text":
-					textParts = append(textParts, map[string]any{"type": "output_text", "text": jsonx.GetString(bm, "text")})
+			}
+			// The reasoning and call items come first, a run of consecutive
+			// thinking blocks folding into one reasoning item whose summary
+			// carries every block of the run. The item holds type and summary
+			// only: the Responses reasoning item the reference builds drops the
+			// blocks' signatures rather than guessing at encrypted_content.
+			for i := 0; i < len(blocks); {
+				switch jsonx.GetString(blocks[i], "type") {
 				case "thinking":
-					flushText()
-					th := jsonx.GetString(bm, "thinking")
-					item := map[string]any{
-						"type":    "reasoning",
-						"summary": []any{map[string]any{"type": "summary_text", "text": th}},
+					var summary []any
+					for i < len(blocks) && jsonx.GetString(blocks[i], "type") == "thinking" {
+						if th := jsonx.GetString(blocks[i], "thinking"); th != "" {
+							summary = append(summary, map[string]any{"type": "summary_text", "text": th})
+						}
+						i++
 					}
-					if sig := jsonx.GetString(bm, "signature"); sig != "" {
-						item["encrypted_content"] = sig
+					if len(summary) > 0 {
+						input = append(input, map[string]any{"type": "reasoning", "summary": summary})
 					}
-					input = append(input, item)
 				case "tool_use":
-					flushText()
-					args, _ := json.Marshal(bm["input"])
-					if bm["input"] == nil {
+					args, _ := json.Marshal(blocks[i]["input"])
+					if blocks[i]["input"] == nil {
 						args = []byte("{}")
 					}
 					input = append(input, map[string]any{
 						"type":      "function_call",
-						"call_id":   jsonx.GetString(bm, "id"),
-						"name":      jsonx.GetString(bm, "name"),
+						"call_id":   jsonx.GetString(blocks[i], "id"),
+						"name":      jsonx.GetString(blocks[i], "name"),
 						"arguments": string(args),
 					})
+					i++
+				default:
+					i++
 				}
 			}
-			flushText()
+			// Every text block of the turn then aggregates into one assistant
+			// message appended after the items above, not interleaved between
+			// the calls it sits around.
+			var textParts []any
+			for _, bm := range blocks {
+				if jsonx.GetString(bm, "type") == "text" {
+					textParts = append(textParts, map[string]any{"type": "output_text", "text": jsonx.GetString(bm, "text")})
+				}
+			}
+			if len(textParts) > 0 {
+				input = append(input, map[string]any{"type": "message", "role": "assistant", "content": textParts})
+			}
 		}
 	}
 	return input
 }
 
-func contentText(content any) string {
-	switch c := content.(type) {
-	case string:
-		return c
-	case []any:
-		var parts []string
-		for _, p := range c {
-			if pm, ok := jsonx.AsMap(p); ok {
-				parts = append(parts, jsonx.GetString(pm, "text"))
+// systemTextParts renders a system block list as input_text parts, one per
+// nonempty text block, keeping a block's prompt_cache_breakpoint on its part.
+func systemTextParts(list []any) []any {
+	var parts []any
+	for _, b := range list {
+		bm, ok := jsonx.AsMap(b)
+		if !ok || jsonx.GetString(bm, "type") != "text" {
+			continue
+		}
+		text := jsonx.GetString(bm, "text")
+		if text == "" {
+			continue
+		}
+		part := map[string]any{"type": "input_text", "text": text}
+		if v, ok := bm["prompt_cache_breakpoint"]; ok && v != nil {
+			part["prompt_cache_breakpoint"] = v
+		}
+		parts = append(parts, part)
+	}
+	return parts
+}
+
+// hasCacheBreakpoint reports whether any block of the list declares a
+// prompt_cache_breakpoint marker.
+func hasCacheBreakpoint(list []any) bool {
+	for _, b := range list {
+		if bm, ok := jsonx.AsMap(b); ok {
+			if v, present := bm["prompt_cache_breakpoint"]; present && v != nil {
+				return true
 			}
 		}
-		return strings.Join(parts, "\n")
-	default:
-		return jsonx.String(c)
 	}
+	return false
 }
 
 func imageURL(bm map[string]any) string {
@@ -347,11 +457,23 @@ func imageURL(bm map[string]any) string {
 	case "url":
 		return jsonx.GetString(src, "url")
 	case "base64":
-		media := jsonx.GetString(src, "media_type")
-		if media == "" {
-			media = "image/jpeg"
+		data := jsonx.GetString(src, "data")
+		if data == "" {
+			// No bytes, no part: the reference drops the image rather than
+			// emit a data URL with nothing in it.
+			return ""
 		}
-		return "data:" + media + ";base64," + jsonx.GetString(src, "data")
+		media := "image/jpeg"
+		if v, ok := src["media_type"]; ok {
+			// The default applies only when the field is absent; a value the
+			// caller spelled out renders as itself, an explicit null included
+			// (the reference stringifies it to "None").
+			media = jsonx.String(v)
+			if v == nil {
+				media = "None"
+			}
+		}
+		return "data:" + media + ";base64," + data
 	}
 	return ""
 }
@@ -464,17 +586,21 @@ func toolsToResponses(v any) []any {
 			out = append(out, map[string]any{"type": "web_search_preview"})
 			continue
 		}
-		strict, _ := jsonx.Bool(m["strict"])
+		strict := truthyValue(m["strict"])
 		tool := map[string]any{
 			"type": "function",
 			"name": jsonx.GetString(m, "name"),
-			// Responses defaults to strict mode when this is absent, silently
+			// Responses turns strict mode on when `strict` is omitted, silently
 			// rewriting `required` to every property. An Anthropic tool is
 			// non-strict unless it asked otherwise, so the flag is stated
-			// rather than left to the target's default.
+			// rather than left to the target's default. The reference reads it
+			// as truthiness: any non-empty value — "true" the string included —
+			// switches strict on.
 			"strict": strict,
 		}
-		if d := jsonx.GetString(m, "description"); d != "" {
+		// Presence, not emptiness: an empty description the caller spelled out
+		// is copied as-is.
+		if d, ok := m["description"]; ok {
 			tool["description"] = d
 		}
 		if s, ok := m["input_schema"]; ok {
@@ -544,6 +670,13 @@ func contextManagementToResponses(cm map[string]any) []any {
 			if tr, ok := jsonx.AsMap(em["trigger"]); ok {
 				if v, ok := jsonx.Int(tr["value"]); ok {
 					entry["compact_threshold"] = v
+				} else if s, ok := tr["value"].(string); ok {
+					// The reference runs the value through int(), which accepts
+					// a numeric string; a threshold named as text still reaches
+					// the target rather than silently losing the trigger.
+					if n, err := strconv.Atoi(strings.TrimSpace(s)); err == nil {
+						entry["compact_threshold"] = n
+					}
 				}
 			}
 			result = append(result, entry)
@@ -554,7 +687,6 @@ func contextManagementToResponses(cm map[string]any) []any {
 
 func thinkingFromReasoning(m map[string]any) []any {
 	var out []any
-	signature := jsonx.GetString(m, "encrypted_content")
 	if list, ok := jsonx.AsSlice(m["summary"]); ok {
 		for _, p := range list {
 			text := ""
@@ -564,22 +696,16 @@ func thinkingFromReasoning(m map[string]any) []any {
 				text = jsonx.String(p)
 			}
 			if text != "" {
-				block := map[string]any{"type": "thinking", "thinking": text}
-				// The opaque field rides along so the item can be replayed;
-				// without it a Messages target that requires a signed thinking
-				// block rejects the turn. Mirrors from_responses.go.
-				if signature != "" {
-					block["signature"] = signature
-				}
-				out = append(out, block)
+				// The signature stays null: only Anthropic can sign a thinking
+				// block, and a stand-in value would be replayed as a real one
+				// and rejected by every backend that verifies it. The item's
+				// encrypted_content is therefore never folded in.
+				out = append(out, map[string]any{"type": "thinking", "thinking": text, "signature": nil})
 			}
 		}
 	}
-	// Reasoning the summary did not spell out still has to reach the target, or
-	// the assistant turn it belongs to arrives empty.
-	if len(out) == 0 && signature != "" {
-		out = append(out, map[string]any{"type": "redacted_thinking", "data": signature})
-	}
+	// A summary with no readable text produces no block at all — no stand-in
+	// redacted block is synthesized from the encrypted_content either.
 	return out
 }
 

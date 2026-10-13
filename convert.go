@@ -302,10 +302,15 @@ func (o *observeReader) feed(chunk []byte) error {
 	if end < 0 {
 		return nil
 	}
-	complete := o.tail[:end]
+	// Scan BEFORE compacting: the complete events alias o.tail, and shifting
+	// the remainder over them mid-scan would corrupt what the observer sees —
+	// a read that ends inside a long event after a mid-stream error frame
+	// clobbered the error itself, so InBandErr was lost and the mangled bytes
+	// could even read as a phantom terminal.
+	scanErr := stream.Scan(bytes.NewReader(o.tail[:end]), o.observer.Feed)
 	copy(o.tail, o.tail[end:])
 	o.tail = o.tail[:len(o.tail)-end]
-	return stream.Scan(bytes.NewReader(complete), o.observer.Feed)
+	return scanErr
 }
 
 // flush hands the observer what the stream left un-terminated: an upstream may

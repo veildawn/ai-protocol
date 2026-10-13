@@ -29,7 +29,9 @@ type StreamOpts struct {
 // the same one (StreamResult carries it as Truncated). See PipeResponsesToChat
 // for the worked case that made this the rule.
 func PipeMessagesToResponses(dst io.Writer, src io.Reader, opts StreamOpts) (int64, error) {
-	st := &msgToResp{model: opts.Model}
+	// output_index 0 belongs to the merged message/reasoning item; tools are
+	// announced from 1.
+	st := &msgToResp{model: opts.Model, nextTool: 1}
 	var n int64
 	write := func(evs []stream.Event) error {
 		for _, out := range evs {
@@ -64,12 +66,24 @@ func PipeMessagesToResponses(dst io.Writer, src io.Reader, opts StreamOpts) (int
 // events.
 //
 // The Messages client is told the turn finished only when the SOURCE said so:
-// response.completed, response.incomplete, or the [DONE] sentinel a relay
-// dialect appends instead. A Responses source that ends with none of those was
-// cut — the dialect has no other legal ending — and synthesizing message_stop
-// for it would tell the client it holds a finished turn while the host records a
-// failed delivery for the same one (StreamResult carries it as Truncated). See
-// PipeResponsesToChat for the worked case that made this the rule.
+// response.completed, response.incomplete, response.failed, or the [DONE]
+// sentinel a relay dialect appends instead. A Responses source that ends with
+// none of those was cut — the dialect has no other legal ending — and
+// synthesizing message_stop for it would tell the client it holds a finished
+// turn while the host records a failed delivery for the same one (StreamResult
+// carries it as Truncated). See PipeResponsesToChat for the worked case that
+// made this the rule.
+//
+// The reference's own Responses iterator emits nothing further on [DONE], but
+// the relay sentinel is still the source's close: this library's settlement
+// facts count it as a terminal (stream.ClassifyEvent reports [DONE] as a
+// completion fact, so StreamResult.Terminal is true for it), and the
+// Responses→Chat fold closes on it too. Swallowing it here would leave the
+// host booking a delivered turn while the Messages client's stream never
+// closes — the exact host/client divergence the truncation rule exists to
+// prevent. A typed response.failed closes the turn for the client the way the
+// reference's adapter does — the failure itself still surfaces as
+// StreamResult.InBandErr.
 func PipeResponsesToMessages(dst io.Writer, src io.Reader, opts StreamOpts) (int64, error) {
 	st := &respToMsg{model: opts.Model}
 	var n int64
@@ -102,19 +116,41 @@ func PipeResponsesToMessages(dst io.Writer, src io.Reader, opts StreamOpts) (int
 	return n, nil
 }
 
-// msgRespItem is one Responses output item backed by one Anthropic content
-// block. text accumulates message text, reasoning summary, or call arguments
-// depending on kind.
-type msgRespItem struct {
-	kind      string // "message" | "reasoning" | "function_call"
-	id        string
-	index     int
-	text      strings.Builder
-	callID    string
-	name      string
-	encrypted string
-	noSummary bool // redacted_thinking: a reasoning item with no summary part
-	closed    bool
+// msgThinkingBlock mirrors one Anthropic thinking/redacted_thinking block for
+// the completed snapshot's merged reasoning item: its share of the summary
+// text plus the opaque bytes the next turn replays.
+type msgThinkingBlock struct {
+	redacted bool
+	text     strings.Builder
+	sig      string
+	data     string
+}
+
+// blockMaps renders the accumulated thinking blocks the way the source spoke
+// them, which is the array encrypted_content re-encodes.
+func blockMaps(blocks []*msgThinkingBlock) []any {
+	var out []any
+	for _, b := range blocks {
+		if b.redacted {
+			m := map[string]any{"type": "redacted_thinking", "data": b.data}
+			out = append(out, m)
+			continue
+		}
+		m := map[string]any{"type": "thinking", "thinking": b.text.String()}
+		if b.sig != "" {
+			m["signature"] = b.sig
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// msgToolItem is one streamed tool call, opened when its Anthropic block opens.
+type msgToolItem struct {
+	callID string
+	name   string
+	args   strings.Builder
+	index  int // output_index; 0 is reserved for the merged message/reasoning item
 }
 
 type msgToResp struct {
@@ -123,16 +159,36 @@ type msgToResp struct {
 	id      string
 	model   string
 
-	items    []*msgRespItem
-	blocks   map[int]*msgRespItem // content-block index → item
-	next     int
+	msgID string // minted with the prelude or at the first text delta; every message event references it
+	rsID  string // minted at the first thinking delta; the reasoning events reference it
+
+	// announced records that the stream's one index-0 item was decided — the
+	// reference's bridge announces exactly one item off the first content
+	// chunk (reasoning for a thinking delta, nothing for a tool chunk, the
+	// message item otherwise) and never announces a second, so a thinking- or
+	// tool-first stream's message item is only ever named by its own events.
+	announced bool
+	// reasoningActive/reasoningDone track the reasoning item's lifecycle: the
+	// reference closes a reasoning stretch with its done trio at the first
+	// following non-reasoning chunk, not at the end of the stream.
+	reasoningActive bool
+	reasoningDone   bool
+
+	text     strings.Builder
+	thinking []*msgThinkingBlock
+	tools    []*msgToolItem
+	blocks   map[int]*msgToolItem // content-block index → tool item
+	nextTool int                  // next tool output_index, from 1
+
 	seq      int
 	eventSeq int
 
-	inTok     int
-	cachedTok int
-	outTok    int
-	stop      string
+	inTok        int
+	inRawTok     int
+	cachedTok    int
+	cacheWriteTk int
+	outTok       int
+	stop         string
 }
 
 // respEvent builds one Responses event. Every event carries a sequence_number
@@ -145,160 +201,185 @@ func (s *msgToResp) respEvent(typ string, fields map[string]any) stream.Event {
 }
 
 func (s *msgToResp) responseShell() map[string]any {
-	return map[string]any{"id": s.id, "object": "response", "model": s.model, "status": "in_progress"}
+	// The shell the reference's prelude carries. Everything here is derivable
+	// without the request or a clock; created_at is the one field the
+	// reference fills from the wall clock, and this library's contract has
+	// none (README: offline, no clock).
+	return map[string]any{
+		"id": s.id, "object": "response", "model": s.model, "status": "in_progress",
+		"output":              []any{},
+		"parallel_tool_calls": true,
+		"tool_choice":         "auto",
+		"tools":               []any{},
+		"top_p":               1.0,
+		"reasoning":           map[string]any{"effort": nil, "summary": nil},
+		"store":               true,
+	}
 }
 
-func (s *msgToResp) openBlock(idx int, cb map[string]any) []stream.Event {
-	kind := ""
-	var it *msgRespItem
-	switch jsonx.GetString(cb, "type") {
-	case "text":
-		kind = "message"
-	case "thinking":
-		kind = "reasoning"
-	case "redacted_thinking":
-		kind = "reasoning"
-	case "tool_use":
-		kind = "function_call"
-	default:
+// openShells emits the stream's opening frame pair exactly once. The reference
+// opens the Responses stream before any content is known; which index-0 item it
+// announces is decided later, off the first content chunk.
+func (s *msgToResp) openShells() []stream.Event {
+	if s.started {
 		return nil
 	}
-	it = &msgRespItem{kind: kind, index: s.next}
-	s.next++
-	switch kind {
-	case "message":
-		it.id = fmt.Sprintf("msg_%d", s.seq)
-	case "reasoning":
-		it.id = fmt.Sprintf("rs_%d", s.seq)
-	default:
-		it.id = fmt.Sprintf("fc_%d", s.seq)
+	s.started = true
+	return []stream.Event{
+		s.respEvent("response.created", map[string]any{"response": s.responseShell()}),
+		s.respEvent("response.in_progress", map[string]any{"response": s.responseShell()}),
 	}
+}
+
+// announce opens the stream's one index-0 item the way the reference's bridge
+// does off the first content chunk: a thinking delta announces the merged
+// reasoning item (its deltas then reference the rs id), anything else announces
+// the message item together with its content part. A tool chunk announces
+// nothing — markAnnounced covers that case: the tools announce themselves from
+// index 1 and the message item is never announced after them.
+func (s *msgToResp) announce(reasoningFirst bool) []stream.Event {
+	if s.markAnnounced() {
+		return nil
+	}
+	if reasoningFirst {
+		s.rsID = fmt.Sprintf("rs_%d", s.seq)
+		s.seq++
+		// No summary member on the wire: the reference's event serializes it
+		// as null, which the Responses wire drops for this item.
+		return []stream.Event{s.respEvent("response.output_item.added", map[string]any{
+			"output_index": 0,
+			"item":         map[string]any{"id": s.rsID, "type": "reasoning", "status": "in_progress"},
+		})}
+	}
+	return s.announceMessage()
+}
+
+// announceMessage announces the merged message item and its content part; used
+// for a content-first stream and, at the close, for a stream that never carried
+// content the bridge could announce off (an empty turn still gets its item).
+func (s *msgToResp) announceMessage() []stream.Event {
+	s.msgID = fmt.Sprintf("msg_%d", s.seq)
 	s.seq++
-	if kind == "function_call" {
-		it.callID = jsonx.GetString(cb, "id")
-		it.name = jsonx.GetString(cb, "name")
-	}
-	if kind == "reasoning" && jsonx.GetString(cb, "type") == "redacted_thinking" {
-		it.encrypted = jsonx.GetString(cb, "data")
-		it.noSummary = true
-	}
-	if s.blocks == nil {
-		s.blocks = map[int]*msgRespItem{}
-	}
-	s.blocks[idx] = it
-	s.items = append(s.items, it)
-	return s.openEvents(it)
-}
-
-func (s *msgToResp) openEvents(it *msgRespItem) []stream.Event {
-	var item map[string]any
-	var partType string
-	var partFields map[string]any
-	switch it.kind {
-	case "reasoning":
-		item = map[string]any{"id": it.id, "type": "reasoning", "summary": []any{}}
-		if it.encrypted != "" {
-			item["encrypted_content"] = it.encrypted
-		}
-		if !it.noSummary {
-			partType = "response.reasoning_summary_part.added"
-			partFields = map[string]any{
-				"item_id": it.id, "output_index": it.index, "summary_index": 0,
-				"part": map[string]any{"type": "summary_text", "text": ""},
-			}
-		}
-	case "function_call":
-		item = map[string]any{
-			"id": it.id, "type": "function_call", "status": "in_progress",
-			"call_id": it.callID, "name": it.name, "arguments": "",
-		}
-	default:
-		item = map[string]any{
-			"id": it.id, "type": "message", "role": "assistant",
-			"status": "in_progress", "content": []any{},
-		}
-		partType = "response.content_part.added"
-		partFields = map[string]any{
-			"item_id": it.id, "output_index": it.index, "content_index": 0,
-			"part": map[string]any{"type": "output_text", "text": ""},
-		}
-	}
-	// The events are built in emission order so their sequence numbers do too.
-	evs := []stream.Event{s.respEvent("response.output_item.added", map[string]any{
-		"output_index": it.index, "item": item,
-	})}
-	if partType != "" {
-		evs = append(evs, s.respEvent(partType, partFields))
-	}
-	return evs
-}
-
-func (s *msgToResp) doneEvents(it *msgRespItem) []stream.Event {
-	var evs []stream.Event
-	switch it.kind {
-	case "function_call":
-		evs = append(evs, s.respEvent("response.function_call_arguments.done", map[string]any{
-			"item_id": it.id, "output_index": it.index, "arguments": it.text.String(),
-		}))
-	case "reasoning":
-		if !it.noSummary {
-			evs = append(evs,
-				s.respEvent("response.reasoning_summary_text.done", map[string]any{
-					"item_id": it.id, "output_index": it.index, "summary_index": 0,
-					"text": it.text.String(),
-				}),
-				s.respEvent("response.reasoning_summary_part.done", map[string]any{
-					"item_id": it.id, "output_index": it.index, "summary_index": 0,
-					"part": map[string]any{"type": "summary_text", "text": it.text.String()},
-				}))
-		}
-	default:
-		evs = append(evs,
-			s.respEvent("response.output_text.done", map[string]any{
-				"item_id": it.id, "output_index": it.index, "content_index": 0,
-				"text": it.text.String(),
-			}),
-			s.respEvent("response.content_part.done", map[string]any{
-				"item_id": it.id, "output_index": it.index, "content_index": 0,
-				"part": map[string]any{"type": "output_text", "text": it.text.String()},
-			}))
-	}
-	return append(evs, s.respEvent("response.output_item.done", map[string]any{
-		"output_index": it.index, "item": it.snapshot(),
-	}))
-}
-
-func (it *msgRespItem) snapshot() map[string]any {
-	switch it.kind {
-	case "function_call":
-		return map[string]any{
-			"id": it.id, "type": "function_call", "status": "completed",
-			"call_id": it.callID, "name": it.name, "arguments": it.text.String(),
-		}
-	case "reasoning":
-		item := map[string]any{
-			"id": it.id, "type": "reasoning",
-			"summary": []any{map[string]any{"type": "summary_text", "text": it.text.String()}},
-		}
-		if it.encrypted != "" {
-			item["encrypted_content"] = it.encrypted
-		}
-		return item
-	default:
-		return map[string]any{
-			"id": it.id, "type": "message", "role": "assistant", "status": "completed",
-			"content": []any{map[string]any{"type": "output_text", "text": it.text.String()}},
-		}
+	return []stream.Event{
+		s.respEvent("response.output_item.added", map[string]any{
+			"output_index": 0,
+			"item": map[string]any{
+				"id": s.msgID, "type": "message", "role": "assistant",
+				"status": "in_progress", "content": []any{},
+			},
+		}),
+		s.respEvent("response.content_part.added", map[string]any{
+			"item_id": s.msgID, "output_index": 0, "content_index": 0,
+			"part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}},
+		}),
 	}
 }
 
-func (s *msgToResp) closeBlock(idx int) []stream.Event {
-	it := s.blocks[idx]
-	if it == nil || it.closed {
+// markAnnounced latches the one announcement this stream gets and reports
+// whether it had already been spent.
+func (s *msgToResp) markAnnounced() bool {
+	if s.announced {
+		return true
+	}
+	s.announced = true
+	return false
+}
+
+// reasoningText concatenates the turn's thinking text — the summary the
+// reference's reasoning done events carry.
+func (s *msgToResp) reasoningText() string {
+	var b strings.Builder
+	for _, t := range s.thinking {
+		if !t.redacted {
+			b.WriteString(t.text.String())
+		}
+	}
+	return b.String()
+}
+
+// maybeReasoningDone closes an active reasoning stretch with the reference's
+// done trio — summary text done, summary part done, the reasoning item done —
+// at the first chunk that is not reasoning (text, a tool call, or the finish).
+// The reference fires these mid-stream, before whatever event ended the
+// reasoning; deferring them to the close would misorder them after later deltas.
+func (s *msgToResp) maybeReasoningDone() []stream.Event {
+	if !s.reasoningActive || s.reasoningDone {
 		return nil
 	}
-	it.closed = true
-	return s.doneEvents(it)
+	s.reasoningDone = true
+	if s.rsID == "" {
+		s.rsID = fmt.Sprintf("rs_%d", s.seq)
+		s.seq++
+	}
+	text := s.reasoningText()
+	return []stream.Event{
+		s.respEvent("response.reasoning_summary_text.done", map[string]any{
+			"item_id": s.rsID, "output_index": 0, "summary_index": 0, "text": text,
+		}),
+		s.respEvent("response.reasoning_summary_part.done", map[string]any{
+			"item_id": s.rsID, "output_index": 0, "summary_index": 0,
+			"part": map[string]any{"type": "summary_text", "text": text},
+		}),
+		s.respEvent("response.output_item.done", map[string]any{
+			"output_index": 0,
+			"item": map[string]any{
+				"id": s.rsID, "type": "reasoning",
+				"summary": []any{map[string]any{"type": "summary_text", "text": text}},
+			},
+		}),
+	}
+}
+
+// openTool announces a tool call the moment its Anthropic block opens, the way
+// the reference's bridge does off the block's first chunk.
+func (s *msgToResp) openTool(idx int, cb map[string]any) []stream.Event {
+	t := &msgToolItem{
+		callID: jsonx.GetString(cb, "id"),
+		name:   jsonx.GetString(cb, "name"),
+		index:  s.nextTool,
+	}
+	s.nextTool++
+	if s.blocks == nil {
+		s.blocks = map[int]*msgToolItem{}
+	}
+	s.blocks[idx] = t
+	s.tools = append(s.tools, t)
+	return []stream.Event{s.respEvent("response.output_item.added", map[string]any{
+		"output_index": t.index,
+		"item": map[string]any{
+			"type": "function_call", "id": t.callID, "call_id": t.callID,
+			"name": t.name, "status": "in_progress", "arguments": "",
+		},
+	})}
+}
+
+// finalArgs is the arguments a call closes with. Anthropic sends no
+// input_json_delta for an empty input, and the reference's parser synthesizes
+// "{}" there so the wire value stays parseable JSON.
+func (t *msgToolItem) finalArgs() string {
+	if a := t.args.String(); a != "" {
+		return a
+	}
+	return "{}"
+}
+
+// chunkArgs splits one arguments delta into the ~10-character pieces the
+// reference re-chunks tool deltas to (runes, so a piece never splits a
+// multi-byte character).
+func chunkArgs(part string) []string {
+	runes := []rune(part)
+	if len(runes) == 0 {
+		return nil
+	}
+	var out []string
+	for i := 0; i < len(runes); i += 10 {
+		end := i + 10
+		if end > len(runes) {
+			end = len(runes)
+		}
+		out = append(out, string(runes[i:end]))
+	}
+	return out
 }
 
 func (s *msgToResp) feed(event string, obj map[string]any) []stream.Event {
@@ -307,6 +388,14 @@ func (s *msgToResp) feed(event string, obj map[string]any) []stream.Event {
 		typ = jsonx.GetString(obj, "type")
 	}
 	var evs []stream.Event
+	// The shells open on the first frame, whatever it is — which index-0 item
+	// the stream announces is decided by the first content chunk below, not by
+	// the opening frame. message_start defers its shells to the end of its own
+	// case so they can carry the id and model it names, the way the reference
+	// read-aheads one chunk before opening the Responses stream.
+	if typ != "message_start" {
+		evs = append(evs, s.openShells()...)
+	}
 	switch typ {
 	case "message_start":
 		if msg, ok := jsonx.AsMap(obj["message"]); ok {
@@ -319,53 +408,95 @@ func (s *msgToResp) feed(event string, obj map[string]any) []stream.Event {
 				cr, _ := jsonx.Int(u["cache_read_input_tokens"])
 				cw, _ := jsonx.Int(u["cache_creation_input_tokens"])
 				s.inTok = in + cr + cw
+				s.inRawTok = in
 				s.cachedTok = cr
+				s.cacheWriteTk = cw
 			}
 		}
-		s.started = true
-		evs = append(evs,
-			s.respEvent("response.created", map[string]any{"response": s.responseShell()}),
-			s.respEvent("response.in_progress", map[string]any{"response": s.responseShell()}),
-		)
+		evs = append(evs, s.openShells()...)
 	case "content_block_start":
 		idx, _ := jsonx.Int(obj["index"])
 		cb, _ := jsonx.AsMap(obj["content_block"])
-		if cb != nil {
-			evs = append(evs, s.openBlock(idx, cb)...)
+		if cb == nil {
+			break
+		}
+		switch jsonx.GetString(cb, "type") {
+		case "thinking":
+			s.thinking = append(s.thinking, &msgThinkingBlock{})
+		case "redacted_thinking":
+			s.thinking = append(s.thinking, &msgThinkingBlock{
+				redacted: true, data: jsonx.GetString(cb, "data"),
+			})
+		case "tool_use", "server_tool_use":
+			// A tool chunk is a reasoning-end trigger, and it announces nothing
+			// at index 0: the reference's bridge spends its one announcement
+			// without emitting an event, so the message item of a tool-first
+			// stream is never announced.
+			evs = append(evs, s.maybeReasoningDone()...)
+			s.markAnnounced()
+			// A server-side call the model made is still a call: the reference
+			// folds server_tool_use through the same tool_call path as
+			// tool_use, and dropping its block would lose the call.
+			evs = append(evs, s.openTool(idx, cb)...)
 		}
 	case "content_block_delta":
 		idx, _ := jsonx.Int(obj["index"])
-		it := s.blocks[idx]
 		delta, _ := jsonx.AsMap(obj["delta"])
-		if it == nil || delta == nil {
-			return evs
+		if delta == nil {
+			break
 		}
 		switch jsonx.GetString(delta, "type") {
 		case "text_delta":
+			evs = append(evs, s.maybeReasoningDone()...)
+			evs = append(evs, s.announce(false)...)
+			if s.msgID == "" {
+				s.msgID = fmt.Sprintf("msg_%d", s.seq)
+				s.seq++
+			}
 			text := jsonx.GetString(delta, "text")
-			it.text.WriteString(text)
+			s.text.WriteString(text)
 			evs = append(evs, s.respEvent("response.output_text.delta", map[string]any{
-				"item_id": it.id, "output_index": it.index, "content_index": 0, "delta": text,
-			}))
-		case "input_json_delta":
-			part := jsonx.GetString(delta, "partial_json")
-			it.text.WriteString(part)
-			evs = append(evs, s.respEvent("response.function_call_arguments.delta", map[string]any{
-				"item_id": it.id, "output_index": it.index, "delta": part,
+				"item_id": s.msgID, "output_index": 0, "content_index": 0, "delta": text,
 			}))
 		case "thinking_delta":
 			thinking := jsonx.GetString(delta, "thinking")
-			it.text.WriteString(thinking)
+			if len(s.thinking) == 0 {
+				s.thinking = append(s.thinking, &msgThinkingBlock{})
+			}
+			s.thinking[len(s.thinking)-1].text.WriteString(thinking)
+			s.reasoningActive = true
+			evs = append(evs, s.announce(true)...)
+			if s.rsID == "" {
+				s.rsID = fmt.Sprintf("rs_%d", s.seq)
+				s.seq++
+			}
 			evs = append(evs, s.respEvent("response.reasoning_summary_text.delta", map[string]any{
-				"item_id": it.id, "output_index": it.index, "summary_index": 0, "delta": thinking,
+				"item_id": s.rsID, "output_index": 0, "summary_index": 0, "delta": thinking,
 			}))
 		case "signature_delta":
-			it.encrypted += jsonx.GetString(delta, "signature")
+			if len(s.thinking) > 0 {
+				s.thinking[len(s.thinking)-1].sig += jsonx.GetString(delta, "signature")
+			}
+		case "input_json_delta":
+			t := s.blocks[idx]
+			if t == nil {
+				break
+			}
+			evs = append(evs, s.maybeReasoningDone()...)
+			part := jsonx.GetString(delta, "partial_json")
+			t.args.WriteString(part)
+			for _, piece := range chunkArgs(part) {
+				evs = append(evs, s.respEvent("response.function_call_arguments.delta", map[string]any{
+					"item_id": t.callID, "output_index": t.index, "delta": piece,
+				}))
+			}
 		}
 	case "content_block_stop":
-		idx, _ := jsonx.Int(obj["index"])
-		evs = append(evs, s.closeBlock(idx)...)
+		// The reference defers every done event to the end of the stream, so a
+		// block closing mid-stream produces nothing here.
 	case "message_delta":
+		// The finish chunk ends an active reasoning stretch too.
+		evs = append(evs, s.maybeReasoningDone()...)
 		if d, ok := jsonx.AsMap(obj["delta"]); ok {
 			if sr := jsonx.GetString(d, "stop_reason"); sr != "" {
 				s.stop = sr
@@ -380,6 +511,7 @@ func (s *msgToResp) feed(event string, obj map[string]any) []stream.Event {
 			}
 		}
 	case "message_stop":
+		evs = append(evs, s.maybeReasoningDone()...)
 		evs = append(evs, s.complete()...)
 	case "error":
 		// The upstream declared the turn failed. Emit nothing: the frame the
@@ -397,25 +529,106 @@ func (s *msgToResp) complete() []stream.Event {
 	}
 	s.closed = true
 	var evs []stream.Event
-	output := make([]any, 0, len(s.items))
-	for _, it := range s.items {
-		if !it.closed {
-			it.closed = true
-			evs = append(evs, s.doneEvents(it)...)
+	// A stream that never carried content the bridge could announce off still
+	// announces its message item — an empty turn's item arrives with its done
+	// events, the shape the reference's default branch produces at the finish
+	// chunk.
+	if !s.announced {
+		evs = append(evs, s.announceMessage()...)
+		s.announced = true
+	}
+	status := stopReasonToStatus(s.stop)
+	text := s.text.String()
+	reasoningText, preserved := mergeThinking(blockMaps(s.thinking))
+	if s.msgID == "" {
+		s.msgID = fmt.Sprintf("msg_%d", s.seq)
+		s.seq++
+	}
+
+	// Done events are deferred to the end of the stream, tools before the
+	// message regardless of source order — the order the reference's bridge
+	// emits them in.
+	for _, t := range s.tools {
+		// A call that streamed nothing still closes with "{}" — and the
+		// reference streams that synthesized value as one last delta before
+		// its done event.
+		if t.args.String() == "" {
+			evs = append(evs, s.respEvent("response.function_call_arguments.delta", map[string]any{
+				"item_id": t.callID, "output_index": t.index, "delta": "{}",
+			}))
 		}
-		output = append(output, it.snapshot())
+		args := t.finalArgs()
+		evs = append(evs,
+			s.respEvent("response.function_call_arguments.done", map[string]any{
+				"item_id": t.callID, "output_index": t.index, "arguments": args,
+			}),
+			s.respEvent("response.output_item.done", map[string]any{
+				"output_index": t.index,
+				"item": map[string]any{
+					"type": "function_call", "id": t.callID, "call_id": t.callID,
+					"name": t.name, "status": "completed", "arguments": args,
+				},
+			}))
 	}
-	status := "completed"
-	if s.stop == "max_tokens" {
-		status = "incomplete"
+	// A turn that reasoned folds its reasoning into the message part's done
+	// event as a reasoning_text part; the item itself stays an output_text
+	// message. Reasoning gets no done events of its own on this fold.
+	part := any(map[string]any{"type": "output_text", "text": text, "annotations": []any{}})
+	if reasoningText != "" {
+		part = map[string]any{"type": "reasoning_text", "reasoning": reasoningText}
 	}
+	evs = append(evs,
+		s.respEvent("response.output_text.done", map[string]any{
+			"item_id": s.msgID, "output_index": 0, "content_index": 0, "text": text,
+		}),
+		s.respEvent("response.content_part.done", map[string]any{
+			"item_id": s.msgID, "output_index": 0, "content_index": 0, "part": part,
+		}),
+		s.respEvent("response.output_item.done", map[string]any{
+			"output_index": 0,
+			"item": map[string]any{
+				"id": s.msgID, "status": "completed", "type": "message", "role": "assistant",
+				"content": []any{map[string]any{"type": "output_text", "text": text, "annotations": []any{}}},
+			},
+		}))
+
+	// The completed snapshot carries the same ids the streamed events used.
+	var output []any
+	if reasoningText != "" || len(preserved) > 0 {
+		if s.rsID == "" {
+			s.rsID = fmt.Sprintf("rs_%d", s.seq)
+			s.seq++
+		}
+		output = append(output, reasoningItem(reasoningText, preserved, s.rsID, status))
+	}
+	// The streaming snapshot keeps the message part's text even when empty:
+	// the reference's chunk assembler holds content "" (not null), so the
+	// empty string survives onto the wire here — unlike the non-streaming
+	// fold, whose transform nulls empty content out.
+	msgPart := map[string]any{"type": "output_text", "text": text, "annotations": []any{}}
+	output = append(output, map[string]any{
+		"id": s.msgID, "type": "message", "role": "assistant", "status": status,
+		"content": []any{msgPart},
+	})
+	for _, t := range s.tools {
+		output = append(output, map[string]any{
+			"type": "function_call", "id": t.callID, "call_id": t.callID,
+			"name": t.name, "arguments": t.finalArgs(), "status": "completed",
+		})
+	}
+	// The reference's calculate_usage folds cache_creation and cache_read into
+	// prompt_tokens before the responses usage is built, and the terminal
+	// event's usage always carries input_tokens_details — cached_tokens is
+	// simply 0 without a cache.
 	usage := map[string]any{
 		"input_tokens":  s.inTok,
 		"output_tokens": s.outTok,
 		"total_tokens":  s.inTok + s.outTok,
-	}
-	if s.cachedTok > 0 {
-		usage["input_tokens_details"] = map[string]any{"cached_tokens": s.cachedTok}
+		"input_tokens_details": map[string]any{
+			"cached_tokens":      s.cachedTok,
+			"text_tokens":        s.inRawTok,
+			"cache_write_tokens": s.cacheWriteTk,
+		},
 	}
 	resp := map[string]any{
 		"id":     s.id,
@@ -425,12 +638,10 @@ func (s *msgToResp) complete() []stream.Event {
 		"output": output,
 		"usage":  usage,
 	}
-	typ := "response.completed"
-	if status == "incomplete" {
-		typ = "response.incomplete"
-		resp["incomplete_details"] = map[string]any{"reason": "max_output_tokens"}
-	}
-	return append(evs, s.respEvent(typ, map[string]any{"response": resp}))
+	// The reference's streaming bridge closes every turn with
+	// response.completed — an unfinished one says so in response.status, not
+	// in the event type.
+	return append(evs, s.respEvent("response.completed", map[string]any{"response": resp}))
 }
 
 // finishFromSource completes the turn for a source that closed itself with the
@@ -447,11 +658,12 @@ func (s *msgToResp) finishFromSource() []stream.Event {
 type respToMsg struct {
 	started    bool
 	closed     bool
-	id         string
 	model      string
+	seq        int
 	blockOpen  bool
 	blockIndex int
 	blockType  string
+	blockItem  string // the Responses item id that owns the open block
 }
 
 func (s *respToMsg) feed(event string, obj map[string]any) []stream.Event {
@@ -460,19 +672,23 @@ func (s *respToMsg) feed(event string, obj map[string]any) []stream.Event {
 		typ = jsonx.GetString(obj, "type")
 	}
 	if resp, ok := jsonx.AsMap(obj["response"]); ok {
-		if id := jsonx.GetString(resp, "id"); id != "" {
-			s.id = id
-		}
-		if m := jsonx.GetString(resp, "model"); m != "" {
-			s.model = m
+		// The model the wrapper was constructed with (the host's routed model)
+		// wins; the response's own model is only a fallback when no host model
+		// was supplied, which is the reference's adapter behavior.
+		if s.model == "" {
+			if m := jsonx.GetString(resp, "model"); m != "" {
+				s.model = m
+			}
 		}
 	}
 	var evs []stream.Event
+	// message_start rides the first frame whatever it is: the reference's
+	// adapter opens lazily, so a source that skips response.created still
+	// produces a legal Messages stream instead of one that starts mid-block.
+	evs = append(evs, s.openMessageStart()...)
 	switch typ {
 	case "response.created":
-		s.started = true
-		msg := map[string]any{"id": s.id, "type": "message", "role": "assistant", "model": s.model, "content": []any{}}
-		evs = append(evs, stream.Event{Event: "message_start", Data: mustJSON(map[string]any{"type": "message_start", "message": msg})})
+		// The opening frame was emitted above; nothing else to do.
 	case "response.output_text.delta":
 		text := jsonx.String(obj["delta"])
 		evs = append(evs, s.ensure("text", map[string]any{"type": "text", "text": ""})...)
@@ -480,14 +696,17 @@ func (s *respToMsg) feed(event string, obj map[string]any) []stream.Event {
 			"type": "content_block_delta", "index": s.blockIndex,
 			"delta": map[string]any{"type": "text_delta", "text": text},
 		})})
-	case "response.function_call_arguments.delta", "response.custom_tool_call_input.delta":
+	case "response.function_call_arguments.delta":
 		evs = append(evs, stream.Event{Event: "content_block_delta", Data: mustJSON(map[string]any{
 			"type": "content_block_delta", "index": s.blockIndex,
 			"delta": map[string]any{"type": "input_json_delta", "partial_json": jsonx.String(obj["delta"])},
 		})})
 	case "response.output_item.added":
 		item, _ := jsonx.AsMap(obj["item"])
-		if item != nil && isToolCallItem(item) {
+		if item == nil {
+			break
+		}
+		if isToolCallItem(item) {
 			evs = append(evs, s.close()...)
 			// Anthropic numbers content blocks densely from 0: this call takes
 			// the slot after the block that was open, and the first one lands
@@ -505,32 +724,52 @@ func (s *respToMsg) feed(event string, obj map[string]any) []stream.Event {
 					"name": jsonx.GetString(item, "name"), "input": map[string]any{},
 				},
 			})})
+		} else if jsonx.GetString(item, "type") == "message" {
+			// Each message item is its own text block — the text block opens
+			// the moment the item is announced, and a second item's text must
+			// not land in the first one's block, so an item boundary closes
+			// the previous block and opens a fresh one.
+			itemID := jsonx.GetString(item, "id")
+			if s.blockOpen && s.blockType == "text" && s.blockItem == itemID {
+				break
+			}
+			evs = append(evs, s.ensure("text", map[string]any{"type": "text", "text": ""})...)
+			s.blockItem = itemID
+		}
+	case "response.output_item.done":
+		// A message item's block ends at its own done event, the way the
+		// reference closes it there — so even a stream cut before the
+		// terminal leaves no block hanging open.
+		item, _ := jsonx.AsMap(obj["item"])
+		if item == nil {
+			break
+		}
+		if jsonx.GetString(item, "type") == "message" &&
+			s.blockOpen && s.blockType == "text" &&
+			s.blockItem != "" && s.blockItem == jsonx.GetString(item, "id") {
+			evs = append(evs, s.close()...)
 		}
 	case "response.reasoning_summary_text.delta":
-		evs = append(evs, s.ensure("thinking", map[string]any{"type": "thinking", "thinking": ""})...)
-		evs = append(evs, stream.Event{Event: "content_block_delta", Data: mustJSON(map[string]any{
-			"type": "content_block_delta", "index": s.blockIndex,
-			"delta": map[string]any{"type": "thinking_delta", "thinking": jsonx.String(obj["delta"])},
-		})})
-	case "response.output_item.done":
-		// A reasoning item's opaque bytes arrive only here. They ride a
-		// signature_delta on the thinking block — before it closes, since a
-		// signature cannot follow content_block_stop — so the client can
-		// replay the block on the next turn. Dropping them makes the turn
-		// unreplayable against a target that requires a signed block.
-		item, _ := jsonx.AsMap(obj["item"])
-		if item == nil || jsonx.GetString(item, "type") != "reasoning" {
+		text := jsonx.String(obj["delta"])
+		// The reference opens a thinking block only for a non-empty delta: an
+		// empty delta with no block open produces nothing at all (an empty
+		// delta on an already-open block still relays).
+		if text == "" && !(s.blockOpen && s.blockType == "thinking") {
 			break
 		}
-		sig := jsonx.GetString(item, "encrypted_content")
-		if sig == "" || !s.blockOpen || s.blockType != "thinking" {
-			break
-		}
+		// The thinking block opens unsigned (signature ""), matching the
+		// reference's adapter; the fold never synthesizes a signature for it.
+		evs = append(evs, s.ensure("thinking", map[string]any{"type": "thinking", "thinking": "", "signature": ""})...)
 		evs = append(evs, stream.Event{Event: "content_block_delta", Data: mustJSON(map[string]any{
 			"type": "content_block_delta", "index": s.blockIndex,
-			"delta": map[string]any{"type": "signature_delta", "signature": sig},
+			"delta": map[string]any{"type": "thinking_delta", "thinking": text},
 		})})
-	case "response.completed", "response.incomplete":
+	case "response.completed", "response.incomplete", "response.failed":
+		// A typed failure is still the source closing its own turn, and the
+		// reference's adapter closes it exactly like a completed one:
+		// message_delta + message_stop. The host still sees the failure —
+		// StreamResult.InBandErr comes from the source frame, not from the
+		// terminal the fold writes.
 		evs = append(evs, s.close()...)
 		stop := "end_turn"
 		if typ == "response.incomplete" {
@@ -558,14 +797,36 @@ func (s *respToMsg) feed(event string, obj map[string]any) []stream.Event {
 		})})
 		evs = append(evs, stream.Event{Event: "message_stop", Data: mustJSON(map[string]any{"type": "message_stop"})})
 		s.closed = true
-	case "response.failed", "error":
-		// The upstream declared the turn failed. Emit nothing: the frame the
-		// client has to see is the host's error frame for the failed delivery,
-		// and a synthesized terminal here would dress that failure as a
-		// finished turn.
+	case "error":
+		// An untyped error frame is not a terminal the Responses dialect
+		// defines, so it closes nothing here: the frame the client has to see
+		// is the host's error frame for the failed delivery, and a synthesized
+		// terminal would dress that failure as a finished turn.
 		s.closed = true
 	}
 	return evs
+}
+
+// openMessageStart emits the Anthropic opening frame exactly once. The
+// reference's adapter mints a fresh msg id and opens with the fields an
+// Anthropic message carries before they are known: null stop_reason and
+// stop_sequence, and an all-zero usage.
+func (s *respToMsg) openMessageStart() []stream.Event {
+	if s.started {
+		return nil
+	}
+	s.started = true
+	msg := map[string]any{
+		"id": fmt.Sprintf("msg_%d", s.seq), "type": "message", "role": "assistant",
+		"model": s.model, "content": []any{},
+		"stop_reason": nil, "stop_sequence": nil,
+		"usage": map[string]any{
+			"input_tokens": 0, "output_tokens": 0,
+			"cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+		},
+	}
+	s.seq++
+	return []stream.Event{{Event: "message_start", Data: mustJSON(map[string]any{"type": "message_start", "message": msg})}}
 }
 
 func (s *respToMsg) ensure(typ string, block map[string]any) []stream.Event {
@@ -615,15 +876,12 @@ func (s *respToMsg) finishFromSource() []stream.Event {
 	return evs
 }
 
-// isToolCallItem reports whether a Responses output item is a tool call. A
-// custom call carries its payload in `input` rather than `arguments`, but both
-// name a call the model made.
+// isToolCallItem reports whether a Responses output item names a call this
+// fold relays. Only function_call does: the reference's Messages adapter
+// ignores custom_tool_call items entirely, so folding one would invent a call
+// the source never delivered to a Messages client.
 func isToolCallItem(item map[string]any) bool {
-	switch jsonx.GetString(item, "type") {
-	case "function_call", "custom_tool_call":
-		return true
-	}
-	return false
+	return jsonx.GetString(item, "type") == "function_call"
 }
 
 func mustJSON(v any) string {

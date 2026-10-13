@@ -77,7 +77,16 @@ func ClassifyEvent(d Dialect, ev Event) EventFacts {
 	if d == "" {
 		d = inferEventDialect(typ)
 		if d == "" {
+			// An error key marks a Chat error frame; a top-level choices array
+			// marks a Chat chunk that carries neither a type nor an error —
+			// including the finish_reason close. A frame carrying nothing but
+			// usage is the Chat usage tail, which is how the observer, which
+			// classifies with an inferred dialect, sees one at all.
 			if _, ok := obj["error"]; ok {
+				d = Chat
+			} else if _, ok := obj["choices"]; ok {
+				d = Chat
+			} else if _, ok := obj["usage"]; ok {
 				d = Chat
 			}
 		}
@@ -120,10 +129,37 @@ func isFailureEvent(typ string, d Dialect, obj map[string]json.RawMessage) bool 
 	if typ == "error" || typ == "response.failed" {
 		return true
 	}
-	if _, ok := obj["error"]; !ok {
+	if _, ok := obj["error"]; ok {
+		return d == Chat
+	}
+	// A Chat chunk closing with the literal finish_reason "error" is the wire's
+	// own failure close: several OpenAI-compatible backends end the turn that
+	// way instead of with an error frame. It is not a successful completion
+	// fact, so the observer must record a failure rather than settle it as a
+	// clean stop.
+	if d == Chat && chatFinishReasonIsError(obj) {
+		return true
+	}
+	return false
+}
+
+// chatFinishReasonIsError reports whether any choice of a Chat chunk closes
+// with the literal finish_reason "error".
+func chatFinishReasonIsError(obj map[string]json.RawMessage) bool {
+	var chunk struct {
+		Choices []struct {
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+	}
+	if json.Unmarshal(obj["choices"], &chunk.Choices) != nil {
 		return false
 	}
-	return d == Chat
+	for _, choice := range chunk.Choices {
+		if choice.FinishReason == "error" {
+			return true
+		}
+	}
+	return false
 }
 
 func classifyChatEvent(obj map[string]json.RawMessage) EventFacts {
@@ -133,8 +169,14 @@ func classifyChatEvent(obj map[string]json.RawMessage) EventFacts {
 			FinishReason json.RawMessage            `json:"finish_reason"`
 		} `json:"choices"`
 	}
-	if len(obj["choices"]) == 0 || json.Unmarshal(obj["choices"], &chunk.Choices) != nil {
-		return EventFacts{Kind: EventUnknown}
+	// Some OpenAI-compatible backends close with a usage-only chunk that names
+	// no choices key at all. The reference parses that tolerantly
+	// (chunk.get("choices", [])), so a missing key reads as no choices rather
+	// than an unknown event — the usage evidence is that chunk's whole point.
+	if raw := obj["choices"]; len(raw) > 0 {
+		if json.Unmarshal(raw, &chunk.Choices) != nil {
+			return EventFacts{Kind: EventUnknown}
+		}
 	}
 	if len(chunk.Choices) == 0 {
 		// Usage-only chunks are useful evidence for the stream observer, but are
@@ -166,7 +208,13 @@ func classifyChatEvent(obj map[string]json.RawMessage) EventFacts {
 
 func classifyMessagesEvent(typ string, obj map[string]json.RawMessage) EventFacts {
 	switch typ {
-	case "message_start", "content_block_stop":
+	case "message_start":
+		// Anthropic reports usage twice on a Messages stream: inside
+		// message_start's message object, and again on message_delta. HasUsage
+		// states the event carries it, either time.
+		message := rawObject(obj["message"])
+		return EventFacts{Kind: EventPrelude, HasUsage: message != nil && hasJSONValue(message["usage"])}
+	case "content_block_stop":
 		return EventFacts{Kind: EventPrelude}
 	case "message_stop":
 		return EventFacts{Kind: EventComplete}
@@ -174,10 +222,11 @@ func classifyMessagesEvent(typ string, obj map[string]json.RawMessage) EventFact
 		var delta struct {
 			StopReason string `json:"stop_reason"`
 		}
+		hasUsage := hasJSONValue(obj["usage"])
 		if json.Unmarshal(obj["delta"], &delta) == nil && delta.StopReason != "" {
-			return EventFacts{Kind: EventComplete}
+			return EventFacts{Kind: EventComplete, HasUsage: hasUsage}
 		}
-		return EventFacts{Kind: EventPrelude}
+		return EventFacts{Kind: EventPrelude, HasUsage: hasUsage}
 	case "content_block_start":
 		block := rawObject(obj["content_block"])
 		if block == nil {
@@ -185,7 +234,10 @@ func classifyMessagesEvent(typ string, obj map[string]json.RawMessage) EventFact
 		}
 		switch rawString(block["type"]) {
 		case "thinking", "redacted_thinking":
-			if hasJSONValue(block["thinking"]) {
+			// A redacted block carries its whole opaque payload in `data` — the
+			// fold delivers it and so does the reference — so either field
+			// being non-empty is delivered reasoning, not an empty shell.
+			if hasJSONValue(block["thinking"]) || hasJSONValue(block["data"]) {
 				return EventFacts{Kind: EventReasoning}
 			}
 			return EventFacts{Kind: EventPrelude}
@@ -219,6 +271,11 @@ func classifyMessagesEvent(typ string, obj map[string]json.RawMessage) EventFact
 			return EventFacts{Kind: EventPrelude}
 		case rawString(delta["type"]) == "thinking_delta":
 			return EventFacts{Kind: EventPrelude}
+		case rawString(delta["type"]) == "citations_delta":
+			// A citation is search-attribution metadata for text already
+			// delivered: the reference ships it in provider-specific fields,
+			// and no fold here forwards it as client-visible content.
+			return EventFacts{Kind: EventPrelude}
 		case hasVisibleField(delta):
 			return EventFacts{Kind: EventContent}
 		default:
@@ -241,7 +298,7 @@ func classifyResponsesEvent(typ string, obj map[string]json.RawMessage) EventFac
 		return EventFacts{Kind: EventComplete}
 	case "response.incomplete":
 		return EventFacts{Kind: EventIncomplete}
-	case "response.output_text.delta", "response.refusal.delta", "response.audio.delta", "response.audio_transcript.delta":
+	case "response.output_text.delta", "response.audio.delta", "response.audio_transcript.delta":
 		if hasJSONValue(obj["delta"]) {
 			return EventFacts{Kind: EventContent}
 		}
@@ -251,11 +308,21 @@ func classifyResponsesEvent(typ string, obj map[string]json.RawMessage) EventFac
 			return EventFacts{Kind: EventReasoning}
 		}
 		return EventFacts{Kind: EventPrelude}
-	case "response.function_call_arguments.delta", "response.function_call_arguments.done", "response.mcp_call_arguments.delta", "response.mcp_call_arguments.done":
+	case "response.function_call_arguments.delta", "response.function_call_arguments.done", "response.custom_tool_call_input.delta", "response.custom_tool_call_input.done":
+		// custom_tool_call_input is the freeform-input twin of
+		// function_call_arguments: both folds here deliver it as a tool-call
+		// increment, and so does the reference.
 		if hasJSONValue(obj["delta"]) {
 			return EventFacts{Kind: EventContent}
 		}
 		return EventFacts{Kind: EventPrelude}
+	case "response.refusal.delta", "response.mcp_call_arguments.delta", "response.mcp_call_arguments.done":
+		// Known wire events that neither this library's folds nor the
+		// reference deliver to the client (their converters have no branch
+		// and emit an empty chunk). Reporting them as content would claim
+		// visibility no fold provides, so they classify as Unknown and the
+		// host owns retaining them.
+		return EventFacts{Kind: EventUnknown}
 	case "response.output_item.added", "response.output_item.done", "response.content_part.added", "response.content_part.done":
 		return classifyResponsesPart(obj)
 	default:
@@ -277,6 +344,33 @@ func responsesStatus(obj map[string]json.RawMessage) string {
 	return ""
 }
 
+// chatUsageClose reports a Chat usage-only chunk — the closing sentinel
+// several vendors send after the last choice instead of [DONE]. It is a
+// settlement fact, not a per-event Terminal: the usage chunk is not itself a
+// wire-terminal frame of the dialect, so ClassifyEvent leaves it a prelude and
+// the observer applies it where the usage-close exception lives.
+func chatUsageClose(ev Event) bool {
+	var obj map[string]json.RawMessage
+	if json.Unmarshal([]byte(ev.Data), &obj) != nil || obj == nil {
+		return false
+	}
+	if !hasJSONValue(obj["usage"]) {
+		return false
+	}
+	// Messages and Responses events always carry a type; only the Chat wire
+	// has a bare usage tail.
+	if rawString(obj["type"]) != "" {
+		return false
+	}
+	if raw := obj["choices"]; len(raw) > 0 {
+		var choices []json.RawMessage
+		if json.Unmarshal(raw, &choices) == nil && len(choices) > 0 {
+			return false
+		}
+	}
+	return true
+}
+
 func classifyResponsesPart(obj map[string]json.RawMessage) EventFacts {
 	item := rawObject(obj["item"])
 	if len(item) == 0 {
@@ -287,7 +381,12 @@ func classifyResponsesPart(obj map[string]json.RawMessage) EventFacts {
 	}
 	typ := rawString(item["type"])
 	switch typ {
-	case "function_call", "mcp_call", "computer_call", "web_search_call", "image_generation_call":
+	case "function_call", "custom_tool_call":
+		// The reference's fold and both folds here translate exactly these two
+		// item types into tool calls. Other call-shaped items (web_search,
+		// computer, image_generation, mcp) are delivered by no fold, so their
+		// events must not claim client-visible content; they fall through to
+		// Unknown below.
 		if hasJSONValue(item["name"]) || hasJSONValue(item["arguments"]) || hasJSONValue(item["input"]) {
 			return EventFacts{Kind: EventContent}
 		}

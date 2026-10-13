@@ -31,7 +31,11 @@ func TestResponsesToChatConsolidatesSystemMessages(t *testing.T) {
 				map[string]any{"role": "system", "content": " top rule \n"},
 				map[string]any{"role": "system", "content": "system rule"},
 				map[string]any{"role": "user", "content": "first"},
-				map[string]any{"role": "system", "content": "developer rule\nanother rule"},
+				map[string]any{"role": "developer", "content": []any{
+					map[string]any{"type": "text", "text": "developer rule"},
+					map[string]any{"type": "text", "text": "  "},
+					map[string]any{"type": "text", "text": "another rule"},
+				}},
 				map[string]any{"role": "assistant", "content": "reply"},
 				map[string]any{"role": "tool", "tool_call_id": "call_1", "content": "result"},
 			},
@@ -67,11 +71,11 @@ func TestResponsesToChatConsolidatesSystemMessages(t *testing.T) {
 				map[string]any{"role": "developer", "content": "third rule"},
 			}},
 			messages: []any{
-				map[string]any{"role": "system", "content": "first rule"},
+				map[string]any{"role": "developer", "content": "first rule"},
 				map[string]any{"role": "user", "content": "hello"},
 				map[string]any{"role": "system", "content": "  "},
 				map[string]any{"role": "system", "content": "second rule"},
-				map[string]any{"role": "system", "content": "third rule"},
+				map[string]any{"role": "developer", "content": "third rule"},
 			},
 		},
 		{
@@ -80,7 +84,13 @@ func TestResponsesToChatConsolidatesSystemMessages(t *testing.T) {
 				map[string]any{"role": "user", "content": "hello"},
 				map[string]any{"role": "system", "content": ""},
 			}},
-			messages: []any{map[string]any{"role": "user", "content": "hello"}},
+			// Whitespace instructions stay dropped (the deliberate TrimSpace
+			// gate), but a system item stating the empty string is content the
+			// reference keeps — content-is-not-None, empty string included.
+			messages: []any{
+				map[string]any{"role": "user", "content": "hello"},
+				map[string]any{"role": "system", "content": ""},
+			},
 		},
 	}
 
@@ -104,18 +114,24 @@ func TestChatResponsesSystemRoundTrips(t *testing.T) {
 			map[string]any{"role": "user", "content": "again"},
 		}}
 		responses := convertReq(t, Chat, Responses, original)
-		if responses["instructions"] != "first rule second rule" {
+		// Only a system turn folds into instructions; the developer turn rides
+		// the input as its own developer-role item, the way the reference does.
+		if responses["instructions"] != "first rule" {
 			t.Fatalf("instructions=%v", responses["instructions"])
 		}
-		if len(responses["input"].([]any)) != 3 {
+		if len(responses["input"].([]any)) != 4 {
 			t.Fatalf("input=%v", responses["input"])
 		}
 		chat := convertReq(t, Responses, Chat, responses)
+		// Item content that rode as parts stays parts on the chat wire — one
+		// text block per part, never joined into a string; the developer turn
+		// reads as text (the system/developer fold joins its parts).
 		want := []any{
-			map[string]any{"role": "system", "content": "first rule second rule"},
-			map[string]any{"role": "user", "content": "first"},
-			map[string]any{"role": "assistant", "content": "reply"},
-			map[string]any{"role": "user", "content": "again"},
+			map[string]any{"role": "system", "content": "first rule"},
+			map[string]any{"role": "user", "content": []any{map[string]any{"type": "text", "text": "first"}}},
+			map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "text", "text": "reply"}}},
+			map[string]any{"role": "developer", "content": []any{map[string]any{"type": "text", "text": "second rule"}}},
+			map[string]any{"role": "user", "content": []any{map[string]any{"type": "text", "text": "again"}}},
 		}
 		if !reflect.DeepEqual(chat["messages"], want) {
 			t.Fatalf("messages=%#v, want %#v", chat["messages"], want)
@@ -139,22 +155,25 @@ func TestChatResponsesSystemRoundTrips(t *testing.T) {
 		chat := convertReq(t, Responses, Chat, original)
 		responses := convertReq(t, Chat, Responses, chat)
 		// Folded back through chat, the system turns become one instruction
-		// string, joined the way the chat fold joins them.
-		if responses["instructions"] != "top rule late rule last rule" {
+		// string; the developer turn keeps its role through both folds and
+		// stays its own input item.
+		if responses["instructions"] != "top rule late rule" {
 			t.Fatalf("instructions=%v", responses["instructions"])
 		}
-		if len(responses["input"].([]any)) != 2 {
+		if len(responses["input"].([]any)) != 3 {
 			t.Fatalf("input=%v", responses["input"])
 		}
 		// The two folds are not symmetric: chat -> responses folds every
 		// system turn into one instruction string, while responses -> chat
-		// keeps a system item where the caller put it. Folding back therefore
-		// yields the merged form, and that form is stable.
+		// keeps a system or developer item where the caller put it. Folding
+		// back therefore yields the merged form, and that form is stable —
+		// with item content that rode as parts staying part lists.
 		again := convertReq(t, Responses, Chat, responses)
 		want := []any{
-			map[string]any{"role": "system", "content": "top rule late rule last rule"},
-			map[string]any{"role": "user", "content": "hello"},
-			map[string]any{"role": "assistant", "content": "reply"},
+			map[string]any{"role": "system", "content": "top rule late rule"},
+			map[string]any{"role": "user", "content": []any{map[string]any{"type": "text", "text": "hello"}}},
+			map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "text", "text": "reply"}}},
+			map[string]any{"role": "developer", "content": []any{map[string]any{"type": "text", "text": "last rule"}}},
 		}
 		if !reflect.DeepEqual(again["messages"], want) {
 			t.Fatalf("second conversion=%#v, want %#v", again["messages"], want)

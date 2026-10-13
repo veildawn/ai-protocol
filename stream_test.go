@@ -381,6 +381,14 @@ data: {"type":"message_stop"}
 
 `
 
+// The full lifecycle of a thinking+tool+text turn, pinned to the reference
+// (litellm v1.100.1, reproduced by serving /v1/responses off this exact
+// Anthropic stream): the one index-0 announcement is the REASONING item (the
+// first content chunk is a thinking delta — the message item of a
+// reasoning-first stream is never announced and carries no content_part.added),
+// the reasoning stretch closes with its done trio at the first following
+// chunk, and the end-of-stream dones run tools before the message. The
+// completed snapshot orders reasoning, message, function_call.
 func TestPipeMessagesToResponsesToolAndText(t *testing.T) {
 	var dst bytes.Buffer
 	if _, err := PipeStream(Messages, Responses, &dst, strings.NewReader(messagesToolStream), StreamOpts{}); err != nil {
@@ -389,11 +397,11 @@ func TestPipeMessagesToResponsesToolAndText(t *testing.T) {
 	evs := responseEvents(t, dst.String())
 
 	added := eventsOfType(evs, "response.output_item.added")
-	if len(added) != 3 {
-		t.Fatalf("output_item.added count=%d, want reasoning+function_call+message:\n%s", len(added), dst.String())
+	if len(added) != 2 {
+		t.Fatalf("output_item.added count=%d, want reasoning+function_call (the message item is never announced on a reasoning-first stream):\n%s", len(added), dst.String())
 	}
+	var wantTypes = []string{"reasoning", "function_call"}
 	var itemIDs []string
-	var wantTypes = []string{"reasoning", "function_call", "message"}
 	for i, a := range added {
 		item, _ := a["item"].(map[string]any)
 		if item["type"] != wantTypes[i] {
@@ -408,7 +416,7 @@ func TestPipeMessagesToResponsesToolAndText(t *testing.T) {
 		}
 		itemIDs = append(itemIDs, id)
 	}
-	rsID, fcID, msgID := itemIDs[0], itemIDs[1], itemIDs[2]
+	rsID, fcID := itemIDs[0], itemIDs[1]
 
 	for _, d := range eventsOfType(evs, "response.reasoning_summary_text.delta") {
 		if d["item_id"] != rsID {
@@ -416,6 +424,24 @@ func TestPipeMessagesToResponsesToolAndText(t *testing.T) {
 		}
 		if _, ok := d["summary_index"]; !ok {
 			t.Fatalf("reasoning delta missing summary_index: %v", d)
+		}
+	}
+	// The reasoning stretch closes with the reference's done trio as soon as
+	// the first non-reasoning chunk arrives — mid-stream, before the tool's
+	// events.
+	for _, typ := range []string{
+		"response.reasoning_summary_text.done", "response.reasoning_summary_part.done",
+	} {
+		if len(eventsOfType(evs, typ)) != 1 {
+			t.Fatalf("%s count=%d, want 1:\n%s", typ, len(eventsOfType(evs, typ)), dst.String())
+		}
+	}
+	// The part is only ever closed, never opened: the reference emits no
+	// reasoning_summary_part.added and, on a reasoning-first stream, no
+	// content_part.added either.
+	for _, gone := range []string{"response.reasoning_summary_part.added", "response.content_part.added"} {
+		if len(eventsOfType(evs, gone)) != 0 {
+			t.Fatalf("%s must not be emitted on a reasoning-first stream:\n%s", gone, dst.String())
 		}
 	}
 	var fcArgs strings.Builder
@@ -429,24 +455,28 @@ func TestPipeMessagesToResponsesToolAndText(t *testing.T) {
 		t.Fatalf("fc args=%q", fcArgs.String())
 	}
 	for _, d := range eventsOfType(evs, "response.output_text.delta") {
-		if d["item_id"] != msgID {
-			t.Fatalf("text delta item_id=%v want %v", d["item_id"], msgID)
+		if id, _ := d["item_id"].(string); !strings.HasPrefix(id, "msg_") {
+			t.Fatalf("text delta item_id=%v, want the unannounced msg_ id", d["item_id"])
 		}
 		if _, ok := d["content_index"]; !ok {
 			t.Fatalf("text delta missing content_index: %v", d)
 		}
 	}
 	for _, typ := range []string{
-		"response.reasoning_summary_part.added", "response.reasoning_summary_part.done",
-		"response.content_part.added", "response.content_part.done",
-		"response.output_text.done", "response.function_call_arguments.done",
+		"response.content_part.done", "response.output_text.done", "response.function_call_arguments.done",
 	} {
 		if len(eventsOfType(evs, typ)) == 0 {
 			t.Fatalf("missing %s:\n%s", typ, dst.String())
 		}
 	}
-	if n := len(eventsOfType(evs, "response.output_item.done")); n != 3 {
-		t.Fatalf("output_item.done count=%d want 3", n)
+	dones := eventsOfType(evs, "response.output_item.done")
+	if len(dones) != 3 {
+		t.Fatalf("output_item.done count=%d want 3 (reasoning, function_call, message):\n%s", len(dones), dst.String())
+	}
+	for i, want := range []string{"reasoning", "function_call", "message"} {
+		if item, _ := dones[i]["item"].(map[string]any); item["type"] != want {
+			t.Fatalf("done item %d = %v, want %v", i, item["type"], want)
+		}
 	}
 
 	out := completedOutput(t, evs)
@@ -458,13 +488,14 @@ func TestPipeMessagesToResponsesToolAndText(t *testing.T) {
 		t.Fatalf("output[0]=%v", rs)
 	}
 	fc, _ := out[1].(map[string]any)
-	if fc["type"] != "function_call" || fc["call_id"] != "toolu_1" || fc["name"] != "exec_command" || fc["arguments"] != `{"cmd": "ls"}` {
-		t.Fatalf("output[1]=%v", fc)
+	if fc["type"] != "message" {
+		t.Fatalf("output[1]=%v, want the message before the call", fc)
 	}
-	msg, _ := out[2].(map[string]any)
-	if msg["type"] != "message" {
-		t.Fatalf("output[2]=%v", msg)
+	fc2, _ := out[2].(map[string]any)
+	if fc2["type"] != "function_call" || fc2["call_id"] != "toolu_1" || fc2["name"] != "exec_command" || fc2["arguments"] != `{"cmd": "ls"}` {
+		t.Fatalf("output[2]=%v", fc2)
 	}
+	msg := out[1].(map[string]any)
 	parts, _ := msg["content"].([]any)
 	p0, _ := parts[0].(map[string]any)
 	if p0["text"] != "done" {
@@ -739,9 +770,14 @@ func TestPipeChatToMessagesTerminatesOnce(t *testing.T) {
 	}
 }
 
-// A reasoning item's opaque bytes arrive only on output_item.done, and must
-// ride a signature_delta before the thinking block closes — a signature cannot
-// follow content_block_stop. Without it the block cannot be replayed.
+// A reasoning item's opaque bytes arrive on output_item.done, but the
+// reference's Messages adapter (litellm v1.100.1
+// responses_adapters/streaming_iterator.py — it has no signature_delta
+// emission at all) never re-signs them: the thinking block opens unsigned,
+// relays its delta, and closes at the item's done event. The turn the client
+// holds is complete — the fold simply does not fabricate a signature only
+// Anthropic could have produced. This test used to demand the fabricated
+// signature_delta.
 func TestPipeResponsesToMessagesEmitsSignatureDelta(t *testing.T) {
 	src := strings.Join([]string{
 		`data: {"type":"response.created","response":{"id":"r1","model":"m"}}`,
@@ -759,24 +795,38 @@ func TestPipeResponsesToMessagesEmitsSignatureDelta(t *testing.T) {
 	if _, err := PipeStream(Responses, Messages, &dst, strings.NewReader(src), StreamOpts{Model: "m"}); err != nil {
 		t.Fatal(err)
 	}
-	sigAt, stopAt := -1, -1
-	for i, e := range responseEvents(t, dst.String()) {
+	out := dst.String()
+	if strings.Contains(out, "signature_delta") {
+		t.Fatalf("signature_delta emitted; the reference never re-signs replayed reasoning:\n%s", out)
+	}
+	thinkingAt, stopAt, deltaAt := -1, -1, -1
+	for i, e := range responseEvents(t, out) {
 		switch e["type"] {
+		case "content_block_start":
+			if b, ok := e["content_block"].(map[string]any); ok && b["type"] == "thinking" {
+				thinkingAt = i
+				if b["signature"] != "" {
+					t.Fatalf("thinking block = %#v, want the unsigned open", b)
+				}
+			}
 		case "content_block_delta":
-			if d, ok := e["delta"].(map[string]any); ok && d["type"] == "signature_delta" {
-				sigAt = i
-				if d["signature"] != "OPAQUE" {
-					t.Fatalf("signature = %v, want OPAQUE", d["signature"])
+			if d, ok := e["delta"].(map[string]any); ok && d["type"] == "thinking_delta" {
+				deltaAt = i
+				if d["thinking"] != "thinking..." {
+					t.Fatalf("thinking delta = %#v", d)
 				}
 			}
 		case "content_block_stop":
 			stopAt = i
 		}
 	}
-	if sigAt < 0 {
-		t.Fatalf("no signature_delta:\n%s", dst.String())
+	if thinkingAt < 0 || deltaAt < 0 {
+		t.Fatalf("thinking block or its delta lost:\n%s", out)
 	}
-	if stopAt >= 0 && sigAt > stopAt {
-		t.Fatalf("signature_delta must precede content_block_stop:\n%s", dst.String())
+	if stopAt < 0 || stopAt < deltaAt {
+		t.Fatalf("thinking block must close after its delta:\n%s", out)
+	}
+	if !strings.Contains(out, `"stop_reason":"end_turn"`) || !strings.Contains(out, "message_stop") {
+		t.Fatalf("turn not closed for the messages client:\n%s", out)
 	}
 }
