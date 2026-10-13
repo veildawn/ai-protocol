@@ -20,6 +20,8 @@ them.
 
 - Exactly three public dialects, request/response/SSE conversion between any
   pair of them, as pure functions.
+- `PeekModel` reads the top-level `model` member without a full decode, for the
+  hosts that route on it before any conversion runs.
 - Explicit error semantics: `UnsupportedParamError` for a parameter the target
   dialect cannot carry, `MissingRequiredFieldError` for a field the target
   dialect requires that the caller declined to supply (Messages folds and

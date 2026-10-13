@@ -336,9 +336,6 @@ func lastEventEnd(buf []byte) int {
 }
 
 func peekModel(body []byte) string {
-	var p struct {
-		Model string `json:"model"`
-	}
-	_ = jsonxUnmarshalModel(body, &p)
-	return p.Model
+	m, _ := PeekModel(body)
+	return m
 }

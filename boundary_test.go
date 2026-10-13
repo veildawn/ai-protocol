@@ -282,7 +282,7 @@ var boundarySurfaceAllowlist = map[string][]string{
 		"LossMultiChoice", "LossPenaltyControls", "LossSeed", "LossSet", "LossSet.Add", "LossSet.Union",
 		"LossStructuredOutput", "LossToolArguments", "LossUnknownContent", "Messages",
 		"MissingRequiredFieldError", "MissingRequiredFieldError.Error", "Normalize",
-		"PipeStream", "PipeStreamWith", "Responses", "StaticLosses", "StreamOpts", "StreamResult",
+		"PeekModel", "PipeStream", "PipeStreamWith", "Responses", "StaticLosses", "StreamOpts", "StreamResult",
 		"UnsupportedParamError", "UnsupportedParamError.Error",
 	},
 	"stream": {
