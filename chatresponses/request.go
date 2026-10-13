@@ -678,9 +678,17 @@ func responsesToolsToChat(v any) []any {
 			if d := jsonx.GetString(m, "description"); d != "" {
 				fn["description"] = d
 			}
-			if p, ok := m["parameters"]; ok {
-				fn["parameters"] = p
+			// A function tool needs an object schema; a provider rejects one
+			// that carries no `type`, so an absent or empty parameters object
+			// becomes `{"type":"object"}`.
+			params, ok := jsonx.AsMap(m["parameters"])
+			if !ok || params["type"] == nil {
+				if !ok {
+					params = map[string]any{}
+				}
+				params["type"] = "object"
 			}
+			fn["parameters"] = params
 			if st, ok := m["strict"]; ok {
 				fn["strict"] = st
 			}
