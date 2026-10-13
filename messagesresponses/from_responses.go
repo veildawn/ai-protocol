@@ -2,6 +2,7 @@ package messagesresponses
 
 import (
 	"encoding/json"
+	"strings"
 
 	"github.com/veildawn/ai-protocol/internal/jsonx"
 	"github.com/veildawn/ai-protocol/types"
@@ -69,7 +70,7 @@ func inputToMessages(input any) []any {
 				"content": []any{map[string]any{
 					"type":        "tool_result",
 					"tool_use_id": jsonx.GetString(m, "call_id"),
-					"content":     jsonx.GetString(m, "output"),
+					"content":     functionOutputToAnthropic(m["output"]),
 				}},
 			})
 		case "function_call":
@@ -188,6 +189,68 @@ func appendBlocks(content any, blocks []any) []any {
 		out = append(out, c...)
 	}
 	return append(out, blocks...)
+}
+
+// functionOutputToAnthropic renders a Responses function_call_output for an
+// Anthropic tool_result. A plain string stays a string; a part list becomes a
+// block list, and anything else is re-encoded as JSON so the bytes stay
+// parseable rather than rendering as Go syntax.
+func functionOutputToAnthropic(v any) any {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	list, ok := jsonx.AsSlice(v)
+	if !ok {
+		if v == nil {
+			return ""
+		}
+		if b, err := jsonx.Marshal(v); err == nil {
+			return string(b)
+		}
+		return ""
+	}
+	var blocks []any
+	var texts []string
+	for _, p := range list {
+		pm, ok := jsonx.AsMap(p)
+		if !ok {
+			if b, err := jsonx.Marshal(p); err == nil {
+				texts = append(texts, string(b))
+				blocks = append(blocks, map[string]any{"type": "text", "text": string(b)})
+			}
+			continue
+		}
+		switch jsonx.GetString(pm, "type") {
+		case "input_text", "output_text", "text", "":
+			t := jsonx.GetString(pm, "text")
+			texts = append(texts, t)
+			blocks = append(blocks, map[string]any{"type": "text", "text": t})
+		case "input_image":
+			url := jsonx.GetString(pm, "image_url")
+			if iu, ok := jsonx.AsMap(pm["image_url"]); ok {
+				url = jsonx.GetString(iu, "url")
+			}
+			if url != "" {
+				blocks = append(blocks, inputImageToAnthropicBlock(url))
+			}
+		}
+	}
+	// Text-only output stays the flat string a tool result usually carries.
+	if len(blocks) == len(texts) {
+		return strings.Join(texts, "\n")
+	}
+	return blocks
+}
+
+// inputImageToAnthropicBlock builds an Anthropic image block from a URL or data
+// URL.
+func inputImageToAnthropicBlock(url string) map[string]any {
+	block := map[string]any{"type": "image", "source": map[string]any{"type": "url", "url": url}}
+	if strings.HasPrefix(url, "data:") {
+		media, data := splitDataURL(url)
+		block["source"] = map[string]any{"type": "base64", "media_type": media, "data": data}
+	}
+	return block
 }
 
 func partsText(content any) any {
