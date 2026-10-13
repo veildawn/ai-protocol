@@ -1,0 +1,371 @@
+package protocol
+
+import (
+	"bytes"
+	"encoding/json"
+	"strings"
+	"testing"
+)
+
+// This file pins the folds that a LiteLLM v1.100.1 audit found diverging from
+// the reference. Each case is a body or stream the codec used to render as
+// something the target dialect would have refused, or as a silent loss of
+// content the caller supplied.
+
+// A system-only chat request must not become `"input": null`, which the
+// Responses API rejects. The instructions ride a system input item instead.
+func TestChatToResponsesSystemOnlyHasInput(t *testing.T) {
+	body := `{"model":"gpt-5","messages":[{"role":"system","content":"be terse"}]}`
+	out, err := ConvertRequest(Chat, Responses, []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out.Body, &m); err != nil {
+		t.Fatal(err)
+	}
+	input, ok := m["input"].([]any)
+	if !ok || len(input) != 1 {
+		t.Fatalf("input = %#v, want one system item", m["input"])
+	}
+	if _, present := m["instructions"]; present {
+		t.Fatalf("instructions should have folded into input: %#v", m)
+	}
+	item := input[0].(map[string]any)
+	if item["type"] != "message" || item["role"] != "system" {
+		t.Fatalf("item = %#v", item)
+	}
+}
+
+// The assistant turn is reasoning -> message -> function_call. A call emitted
+// before the message it was decided in reads as a call with no text turn.
+func TestChatResponseToResponsesItemOrder(t *testing.T) {
+	body := `{"id":"c1","model":"m","choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":"hi","tool_calls":[{"id":"c1","type":"function","function":{"name":"fn","arguments":"{}"}}]}}]}`
+	out, err := ConvertResponse(Chat, Responses, []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatal(err)
+	}
+	var types []string
+	for _, item := range m["output"].([]any) {
+		types = append(types, item.(map[string]any)["type"].(string))
+	}
+	if strings.Join(types, ",") != "message,function_call" {
+		t.Fatalf("output order = %v, want message before function_call", types)
+	}
+}
+
+// A reasoning delta on a Responses stream is model output the chat wire carries
+// in its own field; dropping the frame leaves the client an answer with no
+// reasoning.
+func TestResponsesToChatStreamKeepsReasoning(t *testing.T) {
+	src := strings.Join([]string{
+		`event: response.reasoning_summary_text.delta`,
+		`data: {"type":"response.reasoning_summary_text.delta","delta":"think"}`,
+		``,
+		`event: response.completed`,
+		`data: {"type":"response.completed","response":{"id":"r","status":"completed","output":[]}}`,
+		``,
+	}, "\n")
+	var dst bytes.Buffer
+	if _, err := PipeStream(Responses, Chat, &dst, strings.NewReader(src), StreamOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(dst.String(), `"reasoning_content":"think"`) {
+		t.Fatalf("reasoning lost:\n%s", dst.String())
+	}
+}
+
+// An incomplete turn that happened to contain a call is still a ceiling cut,
+// not a turn where the model chose to call a tool.
+func TestResponsesToChatIncompleteKeepsItsReason(t *testing.T) {
+	src := strings.Join([]string{
+		`event: response.incomplete`,
+		`data: {"type":"response.incomplete","response":{"id":"r","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"function_call","call_id":"c","name":"f","arguments":"{}"}]}}`,
+		``,
+	}, "\n")
+	var dst bytes.Buffer
+	if _, err := PipeStream(Responses, Chat, &dst, strings.NewReader(src), StreamOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(dst.String(), `"finish_reason":"length"`) {
+		t.Fatalf("want length:\n%s", dst.String())
+	}
+}
+
+// Usage details have to survive both folds, or a host loses the reasoning-token
+// and cache breakdowns it bills on.
+func TestUsageDetailsCrossChatAndResponses(t *testing.T) {
+	chat := `{"id":"c1","model":"m","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"x"}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens_details":{"reasoning_tokens":2}}}`
+	out, err := ConvertResponse(Chat, Responses, []byte(chat))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatal(err)
+	}
+	usage := m["usage"].(map[string]any)
+	if _, ok := usage["input_tokens_details"]; !ok {
+		t.Fatalf("input_tokens_details dropped: %#v", usage)
+	}
+	if _, ok := usage["output_tokens_details"]; !ok {
+		t.Fatalf("output_tokens_details dropped: %#v", usage)
+	}
+
+	back, err := ConvertResponse(Responses, Chat, out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b map[string]any
+	if err := json.Unmarshal(back, &b); err != nil {
+		t.Fatal(err)
+	}
+	u := b["usage"].(map[string]any)
+	if _, ok := u["prompt_tokens_details"]; !ok {
+		t.Fatalf("prompt_tokens_details dropped: %#v", u)
+	}
+	if _, ok := u["completion_tokens_details"]; !ok {
+		t.Fatalf("completion_tokens_details dropped: %#v", u)
+	}
+}
+
+// Anthropic requires the wire to alternate roles, so two consecutive user
+// turns are merged rather than sent as a request the upstream rejects.
+func TestChatToMessagesMergesConsecutiveRoles(t *testing.T) {
+	body := `{"model":"c","max_tokens":10,"messages":[{"role":"user","content":"a"},{"role":"user","content":"b"}]}`
+	out, err := ConvertRequest(Chat, Messages, []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out.Body, &m); err != nil {
+		t.Fatal(err)
+	}
+	msgs := m["messages"].([]any)
+	if len(msgs) != 1 {
+		t.Fatalf("messages = %#v, want one merged turn", msgs)
+	}
+	if got := msgs[0].(map[string]any)["content"]; got != "ab" {
+		t.Fatalf("content = %#v, want the joined text", got)
+	}
+}
+
+// Anthropic enforces [a-zA-Z0-9_-]{1,128} on a tool name, and a tool_use in the
+// history must reference the name the request actually declares.
+func TestChatToMessagesSanitizesToolNames(t *testing.T) {
+	body := `{"model":"c","max_tokens":10,"messages":[{"role":"assistant","tool_calls":[{"id":"t1","type":"function","function":{"name":"a/b<c>","arguments":"{}"}}]},{"role":"tool","tool_call_id":"t1","content":"ok"}],"tools":[{"type":"function","function":{"name":"a/b<c>","parameters":{}}}]}`
+	out, err := ConvertRequest(Chat, Messages, []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out.Body, &m); err != nil {
+		t.Fatal(err)
+	}
+	declared := m["tools"].([]any)[0].(map[string]any)["name"]
+	if declared != "a_b_c_" {
+		t.Fatalf("declared name = %v, want a_b_c_", declared)
+	}
+	blocks := m["messages"].([]any)[0].(map[string]any)["content"].([]any)
+	used := blocks[0].(map[string]any)["name"]
+	if used != declared {
+		t.Fatalf("tool_use name = %v, but the request declares %v", used, declared)
+	}
+}
+
+// An empty text block is a request Anthropic refuses outright, so an empty
+// turn is rewritten rather than passed through.
+func TestChatToMessagesRewritesEmptyText(t *testing.T) {
+	body := `{"model":"c","max_tokens":10,"messages":[{"role":"assistant","content":""},{"role":"user","content":"hi"}]}`
+	out, err := ConvertRequest(Chat, Messages, []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out.Body, &m); err != nil {
+		t.Fatal(err)
+	}
+	content := m["messages"].([]any)[0].(map[string]any)["content"]
+	if content == "" {
+		t.Fatalf("empty assistant content passed through: %#v", content)
+	}
+}
+
+// A cache_control breakpoint lives on a block, so a single text block that
+// carries one cannot collapse to a bare string.
+func TestChatToMessagesKeepsCacheControl(t *testing.T) {
+	body := `{"model":"c","max_tokens":10,"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}]}`
+	out, err := ConvertRequest(Chat, Messages, []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out.Body, &m); err != nil {
+		t.Fatal(err)
+	}
+	content := m["messages"].([]any)[0].(map[string]any)["content"]
+	blocks, ok := content.([]any)
+	if !ok {
+		t.Fatalf("content = %#v, want a block list carrying the breakpoint", content)
+	}
+	if _, ok := blocks[0].(map[string]any)["cache_control"]; !ok {
+		t.Fatalf("cache_control dropped: %#v", blocks[0])
+	}
+}
+
+// A refusal is not a clean stop; collapsing it to "stop" tells the client the
+// model finished normally.
+func TestMessagesToChatMapsRefusalStopReason(t *testing.T) {
+	body := `{"id":"m1","model":"c","stop_reason":"refusal","content":[{"type":"text","text":"no"}],"usage":{"input_tokens":1,"output_tokens":1}}`
+	out, err := ConvertResponse(Messages, Chat, []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatal(err)
+	}
+	fr := m["choices"].([]any)[0].(map[string]any)["finish_reason"]
+	if fr != "content_filter" {
+		t.Fatalf("finish_reason = %v, want content_filter", fr)
+	}
+}
+
+// A chat content part list must be read part by part; rendering it with a
+// generic formatter produces Go syntax the model cannot read.
+func TestChatToMessagesReadsContentParts(t *testing.T) {
+	body := `{"id":"c1","model":"m","choices":[{"message":{"role":"assistant","content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]},"finish_reason":"stop"}]}`
+	out, err := ConvertResponse(Chat, Messages, []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatal(err)
+	}
+	block := m["content"].([]any)[0].(map[string]any)
+	if block["text"] != "ab" {
+		t.Fatalf("text = %#v, want the joined parts", block["text"])
+	}
+}
+
+// An image a tool result returned cannot ride a function_call_output; it is
+// re-attached in the same turn, behind a boundary line.
+func TestMessagesToResponsesToolImageStaysInTurn(t *testing.T) {
+	body := `{"model":"c","max_tokens":100,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA"}}]}]},{"role":"user","content":"next"}]}`
+	out, err := ConvertRequest(Messages, Responses, []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out.Body, &m); err != nil {
+		t.Fatal(err)
+	}
+	input := m["input"].([]any)
+	if len(input) != 3 {
+		t.Fatalf("input = %#v, want the call, the images, then the next turn", input)
+	}
+	images := input[1].(map[string]any)
+	if images["role"] != "user" {
+		t.Fatalf("images item = %#v", images)
+	}
+	parts := images["content"].([]any)
+	if len(parts) != 2 {
+		t.Fatalf("image message parts = %#v, want a boundary and the image", parts)
+	}
+	if !strings.Contains(parts[0].(map[string]any)["text"].(string), "tool output") {
+		t.Fatalf("boundary part = %#v", parts[0])
+	}
+}
+
+// Responses reports the cache split under input_tokens_details; Anthropic
+// reports it as separate fields and counts input_tokens as the remainder.
+func TestResponsesToMessagesMapsCacheUsage(t *testing.T) {
+	body := `{"id":"r1","status":"completed","output":[],"usage":{"input_tokens":100,"output_tokens":10,"input_tokens_details":{"cached_tokens":80}}}`
+	out, err := ConvertResponse(Responses, Messages, []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatal(err)
+	}
+	usage := m["usage"].(map[string]any)
+	if usage["cache_read_input_tokens"] != float64(80) {
+		t.Fatalf("cache_read_input_tokens = %#v", usage)
+	}
+	if usage["input_tokens"] != float64(20) {
+		t.Fatalf("input_tokens = %#v, want the uncached remainder", usage["input_tokens"])
+	}
+}
+
+// Consecutive reasoning items belong to one assistant turn; two consecutive
+// assistant messages are a request the target rejects.
+func TestResponsesToMessagesMergesReasoningIntoTurn(t *testing.T) {
+	body := `{"model":"m","max_output_tokens":10,"input":[{"type":"reasoning","summary":[{"type":"summary_text","text":"a"}]},{"type":"reasoning","summary":[{"type":"summary_text","text":"b"}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}]}`
+	out, err := ConvertRequest(Responses, Messages, []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out.Body, &m); err != nil {
+		t.Fatal(err)
+	}
+	msgs := m["messages"].([]any)
+	if len(msgs) != 1 {
+		t.Fatalf("messages = %#v, want one assistant turn", msgs)
+	}
+	blocks := msgs[0].(map[string]any)["content"].([]any)
+	var types []string
+	for _, b := range blocks {
+		types = append(types, b.(map[string]any)["type"].(string))
+	}
+	if strings.Join(types, ",") != "thinking,thinking,text" {
+		t.Fatalf("blocks = %v", types)
+	}
+}
+
+// A structured function_call_output must not be stringified with Go syntax.
+func TestResponsesToMessagesRendersStructuredToolOutput(t *testing.T) {
+	body := `{"model":"m","max_output_tokens":10,"input":[{"type":"function_call_output","call_id":"c1","output":[{"type":"input_text","text":"a"},{"type":"input_text","text":"b"}]}]}`
+	out, err := ConvertRequest(Responses, Messages, []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out.Body, &m); err != nil {
+		t.Fatal(err)
+	}
+	content := m["messages"].([]any)[0].(map[string]any)["content"].([]any)[0].(map[string]any)["content"]
+	if content != "a\nb" {
+		t.Fatalf("tool result content = %#v", content)
+	}
+}
+
+// A signed thinking block's signature has to reach the target, or the turn
+// cannot be replayed.
+func TestChatResponseToResponsesKeepsThinkingSignature(t *testing.T) {
+	body := `{"id":"c1","model":"m","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"hi","thinking_blocks":[{"type":"thinking","thinking":"why","signature":"SIG"}]}}]}`
+	out, err := ConvertResponse(Chat, Responses, []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range m["output"].([]any) {
+		im := item.(map[string]any)
+		if im["type"] == "reasoning" {
+			if im["encrypted_content"] != "SIG" {
+				t.Fatalf("reasoning item = %#v, want the signature", im)
+			}
+			return
+		}
+	}
+	t.Fatalf("no reasoning item in %#v", m["output"])
+}
