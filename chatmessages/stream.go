@@ -3,7 +3,6 @@ package chatmessages
 import (
 	"encoding/json"
 	"io"
-	"strconv"
 
 	"github.com/veildawn/ai-protocol/internal/jsonx"
 	"github.com/veildawn/ai-protocol/stream"
@@ -476,8 +475,6 @@ func mustJSON(v any) string {
 	}
 	return string(b)
 }
-
-func itoa(i int) string { return strconv.Itoa(i) }
 
 func copyUsage(in map[string]any) map[string]any {
 	out := make(map[string]any, len(in))

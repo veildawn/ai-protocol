@@ -88,11 +88,12 @@ func ResponsesToChat(body map[string]any) (map[string]any, error) {
 		out["model"] = model
 	}
 	input := body["input"]
-	msgs, inputInstructions := responsesInputToChatMessages(input)
-	instructions := appendInstruction(nil, jsonx.GetString(body, "instructions"))
-	instructions = append(instructions, inputInstructions...)
-	if len(instructions) > 0 {
-		msgs = append([]any{map[string]any{"role": "system", "content": strings.Join(instructions, "\n")}}, msgs...)
+	msgs := responsesInputToChatMessages(input)
+	// Top-level instructions become their own leading system message. A
+	// system-role input item stays where the caller put it: hoisting it to the
+	// front reorders the conversation the caller wrote.
+	if inst := jsonx.GetString(body, "instructions"); strings.TrimSpace(inst) != "" {
+		msgs = append([]any{map[string]any{"role": "system", "content": inst}}, msgs...)
 	}
 	out["messages"] = msgs
 	if v, ok := body["max_output_tokens"]; ok {
@@ -264,16 +265,15 @@ func chatContentToInputParts(content any) []any {
 	}
 }
 
-func responsesInputToChatMessages(input any) ([]any, []string) {
+func responsesInputToChatMessages(input any) []any {
 	if s, ok := input.(string); ok {
-		return []any{map[string]any{"role": "user", "content": s}}, nil
+		return []any{map[string]any{"role": "user", "content": s}}
 	}
 	list, ok := jsonx.AsSlice(input)
 	if !ok {
-		return []any{}, nil
+		return []any{}
 	}
 	var msgs []any
-	var instructions []string
 	for _, item := range list {
 		m, ok := jsonx.AsMap(item)
 		if !ok {
@@ -341,8 +341,13 @@ func responsesInputToChatMessages(input any) ([]any, []string) {
 			if role == "" {
 				role = "user"
 			}
+			// A system-role item keeps its place and its role: the chat wire
+			// takes a system message anywhere, so there is no reason to lift it
+			// out of the turn order the caller wrote.
 			if role == "system" || role == "developer" {
-				instructions = appendInstruction(instructions, partsToText(m["content"], "input_text", "output_text", "text"))
+				if text := partsToText(m["content"], "input_text", "output_text", "text"); text != "" {
+					msgs = append(msgs, map[string]any{"role": "system", "content": text})
+				}
 				continue
 			}
 			content, images := partsToChatContent(m["content"], role)
@@ -363,7 +368,7 @@ func responsesInputToChatMessages(input any) ([]any, []string) {
 			msgs = append(msgs, msg)
 		}
 	}
-	return msgs, instructions
+	return msgs
 }
 
 // lastAssistant reports the trailing message when it is an assistant message —

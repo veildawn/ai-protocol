@@ -28,8 +28,10 @@ func TestResponsesToChatConsolidatesSystemMessages(t *testing.T) {
 				},
 			},
 			messages: []any{
-				map[string]any{"role": "system", "content": "top rule\nsystem rule\ndeveloper rule\nanother rule"},
+				map[string]any{"role": "system", "content": " top rule \n"},
+				map[string]any{"role": "system", "content": "system rule"},
 				map[string]any{"role": "user", "content": "first"},
+				map[string]any{"role": "system", "content": "developer rule\nanother rule"},
 				map[string]any{"role": "assistant", "content": "reply"},
 				map[string]any{"role": "tool", "tool_call_id": "call_1", "content": "result"},
 			},
@@ -50,8 +52,8 @@ func TestResponsesToChatConsolidatesSystemMessages(t *testing.T) {
 				map[string]any{"role": "assistant", "content": "reply"},
 			}},
 			messages: []any{
-				map[string]any{"role": "system", "content": "late rule"},
 				map[string]any{"role": "user", "content": "first"},
+				map[string]any{"role": "system", "content": "late rule"},
 				map[string]any{"role": "assistant", "content": "reply"},
 			},
 		},
@@ -65,8 +67,11 @@ func TestResponsesToChatConsolidatesSystemMessages(t *testing.T) {
 				map[string]any{"role": "developer", "content": "third rule"},
 			}},
 			messages: []any{
-				map[string]any{"role": "system", "content": "first rule\nsecond rule\nthird rule"},
+				map[string]any{"role": "system", "content": "first rule"},
 				map[string]any{"role": "user", "content": "hello"},
+				map[string]any{"role": "system", "content": "  "},
+				map[string]any{"role": "system", "content": "second rule"},
+				map[string]any{"role": "system", "content": "third rule"},
 			},
 		},
 		{
@@ -133,15 +138,31 @@ func TestChatResponsesSystemRoundTrips(t *testing.T) {
 		}
 		chat := convertReq(t, Responses, Chat, original)
 		responses := convertReq(t, Chat, Responses, chat)
-		if responses["instructions"] != "top rule\nlate rule\nlast rule" {
+		// Folded back through chat, the system turns become one instruction
+		// string, joined the way the chat fold joins them.
+		if responses["instructions"] != "top rule late rule last rule" {
 			t.Fatalf("instructions=%v", responses["instructions"])
 		}
 		if len(responses["input"].([]any)) != 2 {
 			t.Fatalf("input=%v", responses["input"])
 		}
+		// The two folds are not symmetric: chat -> responses folds every
+		// system turn into one instruction string, while responses -> chat
+		// keeps a system item where the caller put it. Folding back therefore
+		// yields the merged form, and that form is stable.
 		again := convertReq(t, Responses, Chat, responses)
-		if !reflect.DeepEqual(again, chat) {
-			t.Fatalf("second conversion=%#v, want %#v", again, chat)
+		want := []any{
+			map[string]any{"role": "system", "content": "top rule late rule last rule"},
+			map[string]any{"role": "user", "content": "hello"},
+			map[string]any{"role": "assistant", "content": "reply"},
+		}
+		if !reflect.DeepEqual(again["messages"], want) {
+			t.Fatalf("second conversion=%#v, want %#v", again["messages"], want)
+		}
+		twice := convertReq(t, Chat, Responses, again)
+		thrice := convertReq(t, Responses, Chat, twice)
+		if !reflect.DeepEqual(thrice, again) {
+			t.Fatalf("fold is not stable: %#v then %#v", again, thrice)
 		}
 	})
 }

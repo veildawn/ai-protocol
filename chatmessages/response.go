@@ -233,12 +233,3 @@ func anthropicUsageToOpenAI(v any) map[string]any {
 	}
 	return u
 }
-
-func firstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if strings.TrimSpace(v) != "" {
-			return v
-		}
-	}
-	return ""
-}
