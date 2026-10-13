@@ -582,6 +582,8 @@ func reasoningItemFromThinkingBlocks(v any) map[string]any {
 	return map[string]any{"type": "reasoning", "summary": summary}
 }
 
+// reasoningText reads the plaintext a Responses reasoning item carries, joining
+// its summary parts the way the reference does.
 func reasoningText(m map[string]any) string {
 	if s := jsonx.GetString(m, "content"); s != "" {
 		return s
@@ -590,12 +592,14 @@ func reasoningText(m map[string]any) string {
 		var parts []string
 		for _, p := range list {
 			if pm, ok := jsonx.AsMap(p); ok {
-				parts = append(parts, jsonx.GetString(pm, "text"))
-			} else if s, ok := p.(string); ok {
-				parts = append(parts, s)
+				if t := strings.TrimSpace(jsonx.GetString(pm, "text")); t != "" {
+					parts = append(parts, t)
+				}
+			} else if s, ok := p.(string); ok && strings.TrimSpace(s) != "" {
+				parts = append(parts, strings.TrimSpace(s))
 			}
 		}
-		return strings.Join(parts, "")
+		return strings.Join(parts, "\n")
 	}
 	return ""
 }
@@ -647,7 +651,40 @@ func chatToolsToResponses(v any) []any {
 			out = append(out, tool)
 			continue
 		}
+		if jsonx.GetString(m, "type") == "custom" {
+			if custom, ok := jsonx.AsMap(m["custom"]); ok {
+				tool := map[string]any{"type": "custom", "name": jsonx.GetString(custom, "name")}
+				if d := jsonx.GetString(custom, "description"); d != "" {
+					tool["description"] = d
+				}
+				if f, ok := jsonx.AsMap(custom["format"]); ok {
+					tool["format"] = customToolFormatToResponses(f)
+				}
+				out = append(out, tool)
+				continue
+			}
+		}
 		out = append(out, m)
+	}
+	return out
+}
+
+// customToolFormatToResponses unwraps a chat grammar object into the flat
+// grammar shape the Responses API takes.
+func customToolFormatToResponses(format map[string]any) map[string]any {
+	if jsonx.GetString(format, "type") != "grammar" {
+		return format
+	}
+	grammar, ok := jsonx.AsMap(format["grammar"])
+	if !ok {
+		return format
+	}
+	out := map[string]any{"type": "grammar"}
+	if v, ok := grammar["definition"]; ok {
+		out["definition"] = v
+	}
+	if v, ok := grammar["syntax"]; ok {
+		out["syntax"] = v
 	}
 	return out
 }

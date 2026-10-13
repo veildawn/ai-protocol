@@ -142,19 +142,29 @@ func chatChoicesToResponsesOutput(choices []any) []any {
 		}
 		if tbs, ok := jsonx.AsSlice(msg["thinking_blocks"]); ok {
 			var summary []any
+			signature := ""
 			for _, tb := range tbs {
 				if tm, ok := jsonx.AsMap(tb); ok {
 					if t := jsonx.GetString(tm, "thinking"); t != "" {
 						summary = append(summary, map[string]any{"type": "summary_text", "text": t})
 					}
+					// The signature is what lets the block be replayed; without
+					// it a target that verifies the block rejects the turn.
+					if s := jsonx.GetString(tm, "signature"); s != "" {
+						signature = s
+					}
 				}
 			}
 			if len(summary) > 0 {
-				out = append(out, map[string]any{
+				item := map[string]any{
 					"id":      nextID("rs"),
 					"type":    "reasoning",
 					"summary": summary,
-				})
+				}
+				if signature != "" {
+					item["encrypted_content"] = signature
+				}
+				out = append(out, item)
 			}
 		}
 		// The assistant turn is emitted reasoning -> message -> function_call,
