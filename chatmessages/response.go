@@ -85,9 +85,10 @@ func openaiChoicesToAnthropicContent(choices []any) []any {
 			content = append(content, map[string]any{"type": "thinking", "thinking": rc})
 		}
 		if msg["content"] != nil {
-			if s, ok := msg["content"].(string); ok {
-				content = append(content, map[string]any{"type": "text", "text": s})
-			} else if s := jsonx.String(msg["content"]); s != "" && msg["content"] != nil {
+			// A chat message's content is a string or a part list. A list must
+			// be read part by part: rendering it with a generic formatter
+			// produces Go syntax the model cannot read.
+			if s := chatContentToText(msg["content"]); s != "" {
 				content = append(content, map[string]any{"type": "text", "text": s})
 			}
 		}
@@ -126,6 +127,30 @@ func openaiChoicesToAnthropicContent(choices []any) []any {
 	return content
 }
 
+// chatContentToText renders a chat message's content for the Messages wire. A
+// part list contributes only its text parts; anything else has no Messages
+// equivalent here and is skipped rather than stringified.
+func chatContentToText(content any) string {
+	switch c := content.(type) {
+	case string:
+		return c
+	case []any:
+		var parts []string
+		for _, p := range c {
+			pm, ok := jsonx.AsMap(p)
+			if !ok {
+				continue
+			}
+			if jsonx.GetString(pm, "type") == "text" {
+				parts = append(parts, jsonx.GetString(pm, "text"))
+			}
+		}
+		return strings.Join(parts, "")
+	default:
+		return ""
+	}
+}
+
 func finishToStopReason(fr string) string {
 	switch fr {
 	case "stop", "":
@@ -134,6 +159,8 @@ func finishToStopReason(fr string) string {
 		return "max_tokens"
 	case "tool_calls":
 		return "tool_use"
+	case "content_filter":
+		return "refusal"
 	default:
 		return "end_turn"
 	}
@@ -147,6 +174,10 @@ func stopReasonToFinish(sr string) string {
 		return "length"
 	case "tool_use":
 		return "tool_calls"
+	case "refusal", "content_filtered":
+		return "content_filter"
+	case "compaction":
+		return "length"
 	default:
 		return "stop"
 	}

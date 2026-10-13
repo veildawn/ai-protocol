@@ -113,12 +113,19 @@ func (s *chatToMsgState) feedChatChunk(obj map[string]any) []stream.Event {
 	var evs []stream.Event
 	if !s.started {
 		s.started = true
+		// The opening message carries the fields an Anthropic client reads
+		// before any content arrives: a null stop_reason/stop_sequence, and a
+		// usage block whose input_tokens is 0 because the chat source has not
+		// reported it yet (the terminal message_delta carries the real counts).
 		msg := map[string]any{
-			"id":      s.id,
-			"type":    "message",
-			"role":    "assistant",
-			"model":   s.model,
-			"content": []any{},
+			"id":            s.id,
+			"type":          "message",
+			"role":          "assistant",
+			"model":         s.model,
+			"content":       []any{},
+			"stop_reason":   nil,
+			"stop_sequence": nil,
+			"usage":         map[string]any{"input_tokens": 0, "output_tokens": 0},
 		}
 		evs = append(evs,
 			stream.Event{Event: "message_start", Data: mustJSON(map[string]any{"type": "message_start", "message": msg})},
@@ -258,7 +265,7 @@ func (s *chatToMsgState) finish() []stream.Event {
 		evs = append(evs, stream.Event{Event: "message_delta", Data: mustJSON(map[string]any{
 			"type":  "message_delta",
 			"delta": map[string]any{"stop_reason": "end_turn", "stop_sequence": nil},
-			"usage": map[string]any{"output_tokens": 0},
+			"usage": map[string]any{"input_tokens": 0, "output_tokens": 0},
 		})})
 		evs = append(evs, stream.Event{Event: "message_stop", Data: mustJSON(map[string]any{"type": "message_stop"})})
 		s.closed = true

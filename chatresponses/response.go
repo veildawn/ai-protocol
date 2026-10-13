@@ -157,6 +157,21 @@ func chatChoicesToResponsesOutput(choices []any) []any {
 				})
 			}
 		}
+		// The assistant turn is emitted reasoning -> message -> function_call,
+		// the order the Responses API itself uses. A function_call before the
+		// message it was decided in reads as a call with no text turn, and a
+		// client that replays this output against a strict target rejects the
+		// turn.
+		text := contentToPlain(msg["content"])
+		if text != "" {
+			out = append(out, map[string]any{
+				"id":      nextID("msg"),
+				"type":    "message",
+				"role":    "assistant",
+				"status":  "completed",
+				"content": []any{map[string]any{"type": "output_text", "text": text}},
+			})
+		}
 		if tcs, ok := jsonx.AsSlice(msg["tool_calls"]); ok {
 			for _, tc := range tcs {
 				tm, ok := jsonx.AsMap(tc)
@@ -179,16 +194,6 @@ func chatChoicesToResponsesOutput(choices []any) []any {
 					"status":    "completed",
 				})
 			}
-		}
-		text := contentToPlain(msg["content"])
-		if text != "" {
-			out = append(out, map[string]any{
-				"id":      nextID("msg"),
-				"type":    "message",
-				"role":    "assistant",
-				"status":  "completed",
-				"content": []any{map[string]any{"type": "output_text", "text": text}},
-			})
 		}
 	}
 	if out == nil {
@@ -259,6 +264,9 @@ func chatUsageToResponses(v any) map[string]any {
 	if d, ok := jsonx.AsMap(m["prompt_tokens_details"]); ok {
 		u["input_tokens_details"] = d
 	}
+	if d, ok := jsonx.AsMap(m["completion_tokens_details"]); ok {
+		u["output_tokens_details"] = d
+	}
 	return u
 }
 
@@ -273,7 +281,14 @@ func responsesUsageToChat(v any) map[string]any {
 	if total == 0 {
 		total = in + out
 	}
-	return map[string]any{"prompt_tokens": in, "completion_tokens": out, "total_tokens": total}
+	u := map[string]any{"prompt_tokens": in, "completion_tokens": out, "total_tokens": total}
+	if d, ok := jsonx.AsMap(m["input_tokens_details"]); ok {
+		u["prompt_tokens_details"] = d
+	}
+	if d, ok := jsonx.AsMap(m["output_tokens_details"]); ok {
+		u["completion_tokens_details"] = d
+	}
+	return u
 }
 
 func marshalJSON(v any) string {

@@ -15,6 +15,21 @@ func ChatToResponses(body map[string]any) (map[string]any, error) {
 	}
 	msgs, _ := jsonx.AsSlice(body["messages"])
 	instructions, input := chatMessagesToResponsesInput(msgs)
+	if len(input) == 0 {
+		// The Responses API rejects an empty input, and a system-only request
+		// would otherwise serialize `"input": null` — a body the upstream
+		// refuses. Carry the instructions as a system-role input item instead.
+		if instructions != "" {
+			input = []any{map[string]any{
+				"type":    "message",
+				"role":    "system",
+				"content": []any{map[string]any{"type": "input_text", "text": instructions}},
+			}}
+			instructions = ""
+		} else {
+			input = []any{}
+		}
+	}
 	out["input"] = input
 	if instructions != "" {
 		out["instructions"] = instructions
@@ -44,7 +59,9 @@ func ChatToResponses(body map[string]any) (map[string]any, error) {
 	if effort, ok := body["reasoning_effort"]; ok {
 		switch t := effort.(type) {
 		case string:
-			if t != "" && t != "none" {
+			// "none" is a member of the effort vocabulary — it asks for no
+			// reasoning, which is a request, not an absence of one.
+			if t != "" {
 				out["reasoning"] = map[string]any{"effort": t}
 			}
 		case map[string]any:
@@ -150,11 +167,18 @@ func chatMessagesToResponsesInput(msgs []any) (instructions string, input []any)
 			// Order matters: a Responses replay expects the reasoning item
 			// before the call it produced, so the assistant turn is emitted
 			// reasoning -> message -> function_call.
+			//
+			// thinking_blocks is the fallback when reasoning_content is absent:
+			// a turn that arrived over a surface carrying signed blocks still
+			// has reasoning to replay, and dropping it loses the signature the
+			// next turn needs.
 			if rc := jsonx.GetString(m, "reasoning_content"); rc != "" {
 				input = append(input, map[string]any{
 					"type":    "reasoning",
 					"summary": []any{map[string]any{"type": "summary_text", "text": rc}},
 				})
+			} else if item := reasoningItemFromThinkingBlocks(m["thinking_blocks"]); item != nil {
+				input = append(input, item)
 			}
 			text := contentToPlain(m["content"])
 			if text != "" {
@@ -452,6 +476,30 @@ func functionCallOutputText(v any) string {
 	return strings.Join(parts, "\n")
 }
 
+// reasoningItemFromThinkingBlocks builds a Responses reasoning item from a chat
+// message's thinking_blocks, the fallback when reasoning_content is absent. A
+// redacted block carries no readable text, so it contributes no summary part.
+func reasoningItemFromThinkingBlocks(v any) map[string]any {
+	list, ok := jsonx.AsSlice(v)
+	if !ok {
+		return nil
+	}
+	var summary []any
+	for _, raw := range list {
+		bm, ok := jsonx.AsMap(raw)
+		if !ok || jsonx.GetString(bm, "type") != "thinking" {
+			continue
+		}
+		if t := jsonx.GetString(bm, "thinking"); t != "" {
+			summary = append(summary, map[string]any{"type": "summary_text", "text": t})
+		}
+	}
+	if len(summary) == 0 {
+		return nil
+	}
+	return map[string]any{"type": "reasoning", "summary": summary}
+}
+
 func reasoningText(m map[string]any) string {
 	if s := jsonx.GetString(m, "content"); s != "" {
 		return s
@@ -632,6 +680,10 @@ func responseFormatToText(rf map[string]any) map[string]any {
 		return map[string]any{"format": format}
 	case "json_object":
 		return map[string]any{"format": map[string]any{"type": "json_object"}}
+	case "text":
+		// An explicit "no structured output" request; the Responses spelling is
+		// a text format rather than an absent one.
+		return map[string]any{"format": map[string]any{"type": "text"}}
 	default:
 		return nil
 	}

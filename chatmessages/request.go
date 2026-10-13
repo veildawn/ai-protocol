@@ -14,6 +14,38 @@ import (
 
 const openaiMaxToolName = 64
 
+// anthropicMaxToolName is Anthropic's tool-name cap, and its allowed character
+// class. A chat tool name that violates either is refused by the upstream, so
+// it is sanitized on the way in — the same chokepoint the reverse direction
+// already truncates at.
+const anthropicMaxToolName = 128
+
+// emptyTextPlaceholder stands in for an empty text block. Anthropic rejects
+// empty text content with a 400, and there is no way to pass one through, so
+// an empty user or assistant turn is rewritten to this.
+const emptyTextPlaceholder = "[System: Empty message content sanitised to satisfy protocol]"
+
+// sanitizeToolNameForAnthropic makes a chat tool name legal on the Messages
+// wire: every character outside [a-zA-Z0-9_-] becomes '_', and the result is
+// capped at 128 characters.
+func sanitizeToolNameForAnthropic(name string) string {
+	var b strings.Builder
+	b.Grow(len(name))
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	out := b.String()
+	if len(out) > anthropicMaxToolName {
+		out = out[:anthropicMaxToolName]
+	}
+	return out
+}
+
 // The Chat dialect's request vocabulary. A parameter in this set that the
 // target dialect cannot represent is refused, never silently dropped.
 var openaiChatParams = map[string]struct{}{
@@ -48,7 +80,11 @@ func ChatToMessages(body map[string]any, dropParams bool) (map[string]any, error
 		out["model"] = model
 	}
 	msgs, _ := jsonx.AsSlice(body["messages"])
-	system, converted, err := openaiMessagesToAnthropic(msgs)
+	// Tool names are sanitized once and the same mapping is applied to every
+	// tool_use block in the history: a strict target rejects a turn whose
+	// tool_use names a tool the request does not declare.
+	nameMap := anthropicToolNameMap(body["tools"])
+	system, converted, err := openaiMessagesToAnthropic(msgs, nameMap)
 	if err != nil {
 		return nil, err
 	}
@@ -77,17 +113,17 @@ func ChatToMessages(body map[string]any, dropParams bool) (map[string]any, error
 		}
 	}
 	if v, ok := body["tools"]; ok {
-		out["tools"] = openaiToolsToAnthropic(v)
+		out["tools"] = openaiToolsToAnthropic(v, nameMap)
 	}
-	if tc, ok := mapToolChoiceToAnthropic(body["tool_choice"], body["parallel_tool_calls"]); ok {
+	if tc, ok := mapToolChoiceToAnthropic(body["tool_choice"], body["parallel_tool_calls"], nameMap); ok {
 		out["tool_choice"] = tc
 	}
-	if v, ok := body["user"].(string); ok && v != "" && !strings.Contains(v, "@") {
+	if v, ok := body["user"].(string); ok && v != "" && validUserID(v) {
 		out["metadata"] = map[string]any{"user_id": v}
 	}
 	if v, ok := body["thinking"]; ok {
 		out["thinking"] = v
-	} else if effort, ok := body["reasoning_effort"].(string); ok {
+	} else if effort, ok := reasoningEffortString(body["reasoning_effort"]); ok {
 		thinking, err := thinkingFromEffort(effort)
 		if err != nil {
 			return nil, err
@@ -147,7 +183,15 @@ func MessagesToChat(body map[string]any) (map[string]any, error) {
 			out["reasoning_effort"] = effort
 		}
 	}
-	if of, ok := jsonx.AsMap(body["output_format"]); ok {
+	// Structured output arrives under the legacy top-level `output_format` or
+	// the newer `output_config.format`; the legacy field wins when both are set.
+	of, ok := jsonx.AsMap(body["output_format"])
+	if !ok {
+		if oc, ok := jsonx.AsMap(body["output_config"]); ok {
+			of, ok = jsonx.AsMap(oc["format"])
+		}
+	}
+	if ok {
 		if rf := anthropicOutputFormatToOpenAI(of); rf != nil {
 			out["response_format"] = rf
 		}
@@ -223,6 +267,40 @@ func mapStopSequences(v any, drop bool) []any {
 	default:
 		return []any{v}
 	}
+}
+
+// reasoningEffortString reads a reasoning_effort value, which arrives either as
+// a bare string or as the Responses-shaped {"effort": ...} dict a bridged
+// caller sends.
+func reasoningEffortString(v any) (string, bool) {
+	switch t := v.(type) {
+	case string:
+		return t, true
+	case map[string]any:
+		if s := jsonx.GetString(t, "effort"); s != "" {
+			return s, true
+		}
+	}
+	return "", false
+}
+
+// validUserID reports whether a chat `user` value may ride Messages metadata as
+// user_id. Anthropic rejects an email or a phone number there.
+func validUserID(v string) bool {
+	if strings.Contains(v, "@") {
+		return false
+	}
+	digits := 0
+	for _, r := range v {
+		switch {
+		case r >= '0' && r <= '9':
+			digits++
+		case r == '+' || r == ' ' || r == '(' || r == ')' || r == '-':
+		default:
+			return true
+		}
+	}
+	return digits < 7
 }
 
 func thinkingFromEffort(effort string) (map[string]any, error) {
@@ -303,7 +381,33 @@ func truncateToolName(name string) string {
 	return prefix + "_" + h
 }
 
-func openaiToolsToAnthropic(v any) []any {
+// anthropicToolNameMap maps each declared chat tool name to the name that will
+// appear on the Messages wire, so history and tool_choice can reference the
+// same spelling. A name that is already legal maps to itself.
+func anthropicToolNameMap(v any) map[string]string {
+	list, ok := jsonx.AsSlice(v)
+	if !ok {
+		return nil
+	}
+	out := map[string]string{}
+	for _, item := range list {
+		m, ok := jsonx.AsMap(item)
+		if !ok || jsonx.GetString(m, "type") != "function" {
+			continue
+		}
+		fn, ok := jsonx.AsMap(m["function"])
+		if !ok {
+			continue
+		}
+		name := jsonx.GetString(fn, "name")
+		if name != "" {
+			out[name] = sanitizeToolNameForAnthropic(name)
+		}
+	}
+	return out
+}
+
+func openaiToolsToAnthropic(v any, nameMap map[string]string) []any {
 	list, ok := jsonx.AsSlice(v)
 	if !ok {
 		return nil
@@ -317,7 +421,7 @@ func openaiToolsToAnthropic(v any) []any {
 		}
 		if jsonx.GetString(m, "type") == "function" {
 			if fn, ok := jsonx.AsMap(m["function"]); ok {
-				tool := map[string]any{"name": jsonx.GetString(fn, "name")}
+				tool := map[string]any{"name": sanitizeToolNameForAnthropic(jsonx.GetString(fn, "name"))}
 				if d := jsonx.GetString(fn, "description"); d != "" {
 					tool["description"] = d
 				}
@@ -383,7 +487,7 @@ func anthropicToolsToOpenAI(v any) []any {
 	return out
 }
 
-func mapToolChoiceToAnthropic(toolChoice, parallel any) (map[string]any, bool) {
+func mapToolChoiceToAnthropic(toolChoice, parallel any, nameMap map[string]string) (map[string]any, bool) {
 	var out map[string]any
 	switch t := toolChoice.(type) {
 	case nil:
@@ -414,6 +518,13 @@ func mapToolChoiceToAnthropic(toolChoice, parallel any) (map[string]any, bool) {
 				name = jsonx.GetString(t, "name")
 			}
 			if name != "" {
+				// The name must be the one the declared tool now carries, or
+				// the choice points at a tool the upstream does not see.
+				if mapped, ok := nameMap[name]; ok {
+					name = mapped
+				} else {
+					name = sanitizeToolNameForAnthropic(name)
+				}
 				out = map[string]any{"type": "tool", "name": name}
 			}
 		}
@@ -451,7 +562,7 @@ func anthropicToolChoiceToOpenAI(v any) any {
 	}
 }
 
-func openaiMessagesToAnthropic(msgs []any) (system []map[string]any, out []any, err error) {
+func openaiMessagesToAnthropic(msgs []any, nameMap map[string]string) (system []map[string]any, out []any, err error) {
 	var pendingToolResults []any
 	flushTools := func() {
 		if len(pendingToolResults) == 0 {
@@ -459,6 +570,17 @@ func openaiMessagesToAnthropic(msgs []any) (system []map[string]any, out []any, 
 		}
 		out = append(out, map[string]any{"role": "user", "content": pendingToolResults})
 		pendingToolResults = nil
+	}
+	// Anthropic requires the wire to alternate user and assistant. Two
+	// consecutive turns of one role are merged into a single message with
+	// combined content, which is how the caller's intent reads anyway; left
+	// apart they are a request the upstream rejects outright.
+	appendMessage := func(role string, content any) {
+		if last, ok := lastOfRole(out, role); ok {
+			last["content"] = mergeContent(last["content"], content)
+			return
+		}
+		out = append(out, map[string]any{"role": role, "content": content})
 	}
 	for _, item := range msgs {
 		m, ok := jsonx.AsMap(item)
@@ -474,10 +596,16 @@ func openaiMessagesToAnthropic(msgs []any) (system []map[string]any, out []any, 
 			pendingToolResults = append(pendingToolResults, openaiToolResultToAnthropic(m))
 		case "user":
 			flushTools()
-			out = append(out, map[string]any{"role": "user", "content": openaiUserContentToAnthropic(m["content"])})
+			appendMessage("user", openaiUserContentToAnthropic(m["content"]))
 		case "assistant":
 			flushTools()
-			out = append(out, openaiAssistantToAnthropic(m))
+			msg := openaiAssistantToAnthropic(m, nameMap)
+			appendMessage("assistant", msg["content"])
+			if tcs, ok := jsonx.AsSlice(msg["tool_calls"]); ok {
+				if last, ok := lastOfRole(out, "assistant"); ok {
+					last["tool_calls"] = append(existingToolCalls(last), tcs...)
+				}
+			}
 		default:
 			flushTools()
 			out = append(out, m)
@@ -487,9 +615,56 @@ func openaiMessagesToAnthropic(msgs []any) (system []map[string]any, out []any, 
 	return system, out, nil
 }
 
+// lastOfRole returns the trailing message when it already carries role, which
+// is the message a following turn of the same role merges into.
+func lastOfRole(out []any, role string) (map[string]any, bool) {
+	if len(out) == 0 {
+		return nil, false
+	}
+	last, ok := jsonx.AsMap(out[len(out)-1])
+	if !ok || jsonx.GetString(last, "role") != role {
+		return nil, false
+	}
+	return last, true
+}
+
+func existingToolCalls(msg map[string]any) []any {
+	if tcs, ok := jsonx.AsSlice(msg["tool_calls"]); ok {
+		return tcs
+	}
+	return nil
+}
+
+// mergeContent combines two content values for one merged message: two strings
+// join, and a string with a block list becomes a block list.
+func mergeContent(a, b any) any {
+	as, aok := a.(string)
+	bs, bok := b.(string)
+	if aok && bok {
+		return as + bs
+	}
+	var blocks []any
+	if aok {
+		blocks = append(blocks, map[string]any{"type": "text", "text": as})
+	} else if list, ok := jsonx.AsSlice(a); ok {
+		blocks = append(blocks, list...)
+	}
+	if bok {
+		blocks = append(blocks, map[string]any{"type": "text", "text": bs})
+	} else if list, ok := jsonx.AsSlice(b); ok {
+		blocks = append(blocks, list...)
+	}
+	return blocks
+}
+
 func openaiSystemToAnthropic(m map[string]any) []map[string]any {
 	switch c := m["content"].(type) {
 	case string:
+		// Anthropic rejects an empty text block, so an empty system turn
+		// contributes nothing rather than a block the upstream will 400 on.
+		if c == "" {
+			return nil
+		}
 		return []map[string]any{{"type": "text", "text": c}}
 	case []any:
 		var out []map[string]any
@@ -499,7 +674,11 @@ func openaiSystemToAnthropic(m map[string]any) []map[string]any {
 				continue
 			}
 			if jsonx.GetString(pm, "type") == "text" || jsonx.GetString(pm, "text") != "" {
-				block := map[string]any{"type": "text", "text": jsonx.GetString(pm, "text")}
+				text := jsonx.GetString(pm, "text")
+				if text == "" {
+					continue
+				}
+				block := map[string]any{"type": "text", "text": text}
 				if cc, ok := pm["cache_control"]; ok {
 					block["cache_control"] = cc
 				}
@@ -509,7 +688,9 @@ func openaiSystemToAnthropic(m map[string]any) []map[string]any {
 		return out
 	default:
 		if c != nil {
-			return []map[string]any{{"type": "text", "text": jsonx.String(c)}}
+			if s := jsonx.String(c); s != "" {
+				return []map[string]any{{"type": "text", "text": s}}
+			}
 		}
 		return nil
 	}
@@ -518,6 +699,12 @@ func openaiSystemToAnthropic(m map[string]any) []map[string]any {
 func openaiUserContentToAnthropic(content any) any {
 	switch c := content.(type) {
 	case string:
+		// Anthropic rejects an empty text block, and there is no way to pass
+		// one through: an empty user turn is rewritten to a placeholder so the
+		// request is not refused outright.
+		if strings.TrimSpace(c) == "" {
+			return emptyTextPlaceholder
+		}
 		return c
 	case []any:
 		var blocks []any
@@ -532,26 +719,84 @@ func openaiUserContentToAnthropic(content any) any {
 				if text == "" && jsonx.GetString(pm, "type") == "" {
 					continue
 				}
-				blocks = append(blocks, map[string]any{"type": "text", "text": text})
+				if strings.TrimSpace(text) == "" {
+					text = emptyTextPlaceholder
+				}
+				block := map[string]any{"type": "text", "text": text}
+				// A prompt-cache breakpoint is a request feature, not content;
+				// dropping it silently un-caches the prefix the caller marked.
+				if cc, ok := pm["cache_control"]; ok {
+					block["cache_control"] = cc
+				}
+				blocks = append(blocks, block)
 			case "image_url":
 				if img := openaiImageToAnthropic(pm); img != nil {
 					blocks = append(blocks, img)
 				}
 			case "image":
 				blocks = append(blocks, pm)
-			case "document", "file":
+			case "document":
 				blocks = append(blocks, pm)
+			case "file":
+				// A chat `file` part carries a data URL or file id; the
+				// Messages wire takes a document block with a source. Passing
+				// the chat shape through is a spelling Anthropic rejects.
+				if doc := openaiFileToAnthropicDocument(pm); doc != nil {
+					blocks = append(blocks, doc)
+				}
 			}
 		}
 		if len(blocks) == 1 {
 			if b, ok := jsonx.AsMap(blocks[0]); ok && jsonx.GetString(b, "type") == "text" {
-				return jsonx.GetString(b, "text")
+				// A single text block collapses to a plain string for a stable
+				// prompt prefix — unless it carries a cache_control breakpoint,
+				// which only a block can hold.
+				if _, hasCache := b["cache_control"]; !hasCache {
+					return jsonx.GetString(b, "text")
+				}
 			}
 		}
 		return blocks
 	default:
 		return content
 	}
+}
+
+// openaiFileToAnthropicDocument converts a chat `file` part to an Anthropic
+// document block. A data URL becomes base64 source with the media type split
+// out; a bare file id has no Messages equivalent and is dropped rather than
+// forwarded in a spelling the target rejects.
+func openaiFileToAnthropicDocument(pm map[string]any) map[string]any {
+	inner, _ := jsonx.AsMap(pm["file"])
+	data := ""
+	filename := ""
+	if inner != nil {
+		data = jsonx.GetString(inner, "file_data")
+		filename = jsonx.GetString(inner, "filename")
+	}
+	if data == "" {
+		data = jsonx.GetString(pm, "file_data")
+	}
+	if data == "" {
+		return nil
+	}
+	doc := map[string]any{}
+	if strings.HasPrefix(data, "data:") {
+		media, payload := parseDataURL(data)
+		doc["type"] = "document"
+		doc["source"] = map[string]any{
+			"type":       "base64",
+			"media_type": media,
+			"data":       payload,
+		}
+	} else {
+		doc["type"] = "document"
+		doc["source"] = map[string]any{"type": "base64", "media_type": "application/pdf", "data": data}
+	}
+	if filename != "" {
+		doc["title"] = filename
+	}
+	return doc
 }
 
 func openaiImageToAnthropic(pm map[string]any) map[string]any {
@@ -600,16 +845,20 @@ func parseDataURL(url string) (media, data string) {
 	return media, data
 }
 
-func openaiAssistantToAnthropic(m map[string]any) map[string]any {
+func openaiAssistantToAnthropic(m map[string]any, nameMap map[string]string) map[string]any {
 	var blocks []any
 	if tbs, ok := jsonx.AsSlice(m["thinking_blocks"]); ok {
 		for _, tb := range tbs {
 			if tm, ok := jsonx.AsMap(tb); ok {
+				// Anthropic verifies a thinking block's signature; a block
+				// without one is rejected, so an unsigned block is dropped
+				// rather than forwarded as a request the upstream will 400.
+				if jsonx.GetString(tm, "type") == "thinking" && jsonx.GetString(tm, "signature") == "" {
+					continue
+				}
 				blocks = append(blocks, tm)
 			}
 		}
-	} else if rc := jsonx.GetString(m, "reasoning_content"); rc != "" {
-		blocks = append(blocks, map[string]any{"type": "thinking", "thinking": rc})
 	}
 	switch c := m["content"].(type) {
 	case string:
@@ -651,6 +900,11 @@ func openaiAssistantToAnthropic(m map[string]any) map[string]any {
 			name := ""
 			if fn != nil {
 				name = jsonx.GetString(fn, "name")
+				if mapped, ok := nameMap[name]; ok {
+					name = mapped
+				} else {
+					name = sanitizeToolNameForAnthropic(name)
+				}
 			}
 			blocks = append(blocks, map[string]any{
 				"type":  "tool_use",
@@ -668,7 +922,10 @@ func openaiAssistantToAnthropic(m map[string]any) map[string]any {
 		}
 	}
 	if len(blocks) == 0 {
-		out["content"] = ""
+		// Anthropic rejects an empty text block, and there is no way to pass
+		// one through, so an empty assistant turn is rewritten to a placeholder
+		// rather than sent as content the upstream will 400 on.
+		out["content"] = emptyTextPlaceholder
 		return out
 	}
 	out["content"] = blocks
@@ -683,10 +940,44 @@ func openaiToolResultToAnthropic(m map[string]any) map[string]any {
 	switch c := m["content"].(type) {
 	case string:
 		block["content"] = c
+	case []any:
+		// A tool result may carry media. Its parts use the chat vocabulary,
+		// which is not what a Messages tool_result reads, so each part is
+		// converted rather than forwarded verbatim.
+		block["content"] = openaiToolResultPartsToAnthropic(c)
 	default:
 		block["content"] = c
 	}
 	return block
+}
+
+// openaiToolResultPartsToAnthropic converts a chat tool message's content parts
+// to the block list an Anthropic tool_result carries.
+func openaiToolResultPartsToAnthropic(parts []any) []any {
+	out := make([]any, 0, len(parts))
+	for _, p := range parts {
+		pm, ok := jsonx.AsMap(p)
+		if !ok {
+			continue
+		}
+		switch jsonx.GetString(pm, "type") {
+		case "text", "":
+			out = append(out, map[string]any{"type": "text", "text": jsonx.GetString(pm, "text")})
+		case "image_url":
+			if img := openaiImageToAnthropic(pm); img != nil {
+				out = append(out, img)
+			}
+		case "image":
+			out = append(out, pm)
+		case "document":
+			out = append(out, pm)
+		case "file":
+			if doc := openaiFileToAnthropicDocument(pm); doc != nil {
+				out = append(out, doc)
+			}
+		}
+	}
+	return out
 }
 
 func anthropicMessagesToOpenAI(msgs []any) []any {

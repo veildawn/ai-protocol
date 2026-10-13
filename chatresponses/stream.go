@@ -457,6 +457,14 @@ func (s *respToChatState) feed(event string, obj map[string]any) []stream.Event 
 			delta = jsonx.GetString(obj, "text")
 		}
 		return []stream.Event{s.chunk(map[string]any{"content": jsonx.String(delta)}, nil)}
+	case "response.reasoning_summary_text.delta", "response.reasoning_summary.delta", "response.reasoning.delta":
+		// Reasoning is model output the chat wire carries in its own field.
+		// Dropping it leaves the client with an answer and no reasoning.
+		delta := obj["delta"]
+		if delta == nil {
+			delta = jsonx.GetString(obj, "text")
+		}
+		return []stream.Event{s.chunk(map[string]any{"reasoning_content": jsonx.String(delta)}, nil)}
 	case "response.function_call_arguments.delta":
 		return []stream.Event{s.chunk(map[string]any{
 			"tool_calls": []any{map[string]any{
@@ -501,7 +509,11 @@ func (s *respToChatState) feed(event string, obj map[string]any) []stream.Event 
 			}
 		}
 		finish := statusToFinish(status, false, detailReason)
-		if resp != nil {
+		// An incomplete turn keeps its own reason. A ceiling cut that happened
+		// to contain a function_call is still a ceiling cut, and reporting it as
+		// "tool_calls" tells the client the model chose to call a tool when it
+		// actually ran out of room.
+		if status != "incomplete" && resp != nil {
 			if out, ok := jsonx.AsSlice(resp["output"]); ok {
 				for _, it := range out {
 					if im, ok := jsonx.AsMap(it); ok && jsonx.GetString(im, "type") == "function_call" {
