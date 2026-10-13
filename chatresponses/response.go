@@ -63,7 +63,9 @@ func ResponsesResponseToChat(body map[string]any) map[string]any {
 				},
 			})
 		case "reasoning":
-			reasoning += reasoningText(m)
+			// Several reasoning items in one turn read as one block, separated
+			// rather than run together.
+			reasoning = joinReasoning(reasoning, reasoningText(m))
 		}
 	}
 	if len(texts) == 0 {

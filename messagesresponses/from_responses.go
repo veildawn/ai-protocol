@@ -87,6 +87,7 @@ func inputToMessages(input any) []any {
 				}},
 			})
 		case "reasoning":
+			sig := jsonx.GetString(m, "encrypted_content")
 			var blocks []any
 			if sum, ok := jsonx.AsSlice(m["summary"]); ok {
 				for _, p := range sum {
@@ -96,16 +97,29 @@ func inputToMessages(input any) []any {
 					}
 					if text != "" {
 						block := map[string]any{"type": "thinking", "thinking": text}
-						if sig := jsonx.GetString(m, "encrypted_content"); sig != "" {
+						if sig != "" {
 							block["signature"] = sig
 						}
 						blocks = append(blocks, block)
 					}
 				}
 			}
-			if len(blocks) > 0 {
-				msgs = append(msgs, map[string]any{"role": "assistant", "content": blocks})
+			if len(blocks) == 0 {
+				// Reasoning the summary did not spell out still has to reach the
+				// target, or the assistant turn it belongs to arrives empty.
+				if sig == "" {
+					continue
+				}
+				blocks = []any{map[string]any{"type": "redacted_thinking", "data": sig}}
 			}
+			// A reasoning item joins the assistant turn it precedes rather than
+			// opening one of its own: two consecutive assistant messages are a
+			// request the target rejects.
+			if last, ok := trailingAssistant(msgs); ok {
+				last["content"] = appendBlocks(last["content"], blocks)
+				continue
+			}
+			msgs = append(msgs, map[string]any{"role": "assistant", "content": blocks})
 		case "message", "":
 			role := jsonx.GetString(m, "role")
 			if role == "" {
@@ -116,13 +130,64 @@ func inputToMessages(input any) []any {
 				continue
 			}
 			if role == "assistant" {
-				msgs = append(msgs, map[string]any{"role": "assistant", "content": outputPartsToAnthropic(m["content"])})
+				blocks := outputPartsToAnthropic(m["content"])
+				// An assistant message the previous reasoning item opened a turn
+				// for joins that turn. Two consecutive assistant messages are a
+				// request the target rejects.
+				if last, ok := trailingAssistant(msgs); ok {
+					last["content"] = appendBlocks(last["content"], toBlocks(blocks))
+					continue
+				}
+				msgs = append(msgs, map[string]any{"role": "assistant", "content": blocks})
 				continue
 			}
 			msgs = append(msgs, map[string]any{"role": "user", "content": inputPartsToAnthropic(m["content"])})
 		}
 	}
 	return msgs
+}
+
+// trailingAssistant returns the trailing message when it is an assistant turn —
+// the turn a following reasoning item or function_call belongs to.
+func trailingAssistant(msgs []any) (map[string]any, bool) {
+	if len(msgs) == 0 {
+		return nil, false
+	}
+	last, ok := jsonx.AsMap(msgs[len(msgs)-1])
+	if !ok || jsonx.GetString(last, "role") != "assistant" {
+		return nil, false
+	}
+	return last, true
+}
+
+// toBlocks normalizes assistant content to a block list so it can be appended
+// to an existing turn.
+func toBlocks(content any) []any {
+	switch c := content.(type) {
+	case string:
+		if c == "" {
+			return nil
+		}
+		return []any{map[string]any{"type": "text", "text": c}}
+	case []any:
+		return c
+	}
+	return nil
+}
+
+// appendBlocks adds content blocks to an assistant turn's content, promoting a
+// bare string to a block list so the blocks have somewhere to go.
+func appendBlocks(content any, blocks []any) []any {
+	var out []any
+	switch c := content.(type) {
+	case string:
+		if c != "" {
+			out = append(out, map[string]any{"type": "text", "text": c})
+		}
+	case []any:
+		out = append(out, c...)
+	}
+	return append(out, blocks...)
 }
 
 func partsText(content any) any {
