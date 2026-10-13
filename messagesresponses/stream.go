@@ -123,10 +123,11 @@ type msgToResp struct {
 	id      string
 	model   string
 
-	items  []*msgRespItem
-	blocks map[int]*msgRespItem // content-block index → item
-	next   int
-	seq    int
+	items    []*msgRespItem
+	blocks   map[int]*msgRespItem // content-block index → item
+	next     int
+	seq      int
+	eventSeq int
 
 	inTok     int
 	cachedTok int
@@ -134,8 +135,12 @@ type msgToResp struct {
 	stop      string
 }
 
-func respEvent(typ string, fields map[string]any) stream.Event {
+// respEvent builds one Responses event. Every event carries a sequence_number
+// that counts up across the stream, as the Responses SSE protocol requires.
+func (s *msgToResp) respEvent(typ string, fields map[string]any) stream.Event {
 	fields["type"] = typ
+	fields["sequence_number"] = s.eventSeq
+	s.eventSeq++
 	return stream.Event{Event: typ, Data: mustJSON(fields)}
 }
 
@@ -195,7 +200,7 @@ func (s *msgToResp) openEvents(it *msgRespItem) []stream.Event {
 			item["encrypted_content"] = it.encrypted
 		}
 		if !it.noSummary {
-			part = respEvent("response.reasoning_summary_part.added", map[string]any{
+			part = s.respEvent("response.reasoning_summary_part.added", map[string]any{
 				"item_id": it.id, "output_index": it.index, "summary_index": 0,
 				"part": map[string]any{"type": "summary_text", "text": ""},
 			})
@@ -210,12 +215,12 @@ func (s *msgToResp) openEvents(it *msgRespItem) []stream.Event {
 			"id": it.id, "type": "message", "role": "assistant",
 			"status": "in_progress", "content": []any{},
 		}
-		part = respEvent("response.content_part.added", map[string]any{
+		part = s.respEvent("response.content_part.added", map[string]any{
 			"item_id": it.id, "output_index": it.index, "content_index": 0,
 			"part": map[string]any{"type": "output_text", "text": ""},
 		})
 	}
-	evs := []stream.Event{respEvent("response.output_item.added", map[string]any{
+	evs := []stream.Event{s.respEvent("response.output_item.added", map[string]any{
 		"output_index": it.index, "item": item,
 	})}
 	if part.Event != "" {
@@ -228,33 +233,33 @@ func (s *msgToResp) doneEvents(it *msgRespItem) []stream.Event {
 	var evs []stream.Event
 	switch it.kind {
 	case "function_call":
-		evs = append(evs, respEvent("response.function_call_arguments.done", map[string]any{
+		evs = append(evs, s.respEvent("response.function_call_arguments.done", map[string]any{
 			"item_id": it.id, "output_index": it.index, "arguments": it.text.String(),
 		}))
 	case "reasoning":
 		if !it.noSummary {
 			evs = append(evs,
-				respEvent("response.reasoning_summary_text.done", map[string]any{
+				s.respEvent("response.reasoning_summary_text.done", map[string]any{
 					"item_id": it.id, "output_index": it.index, "summary_index": 0,
 					"text": it.text.String(),
 				}),
-				respEvent("response.reasoning_summary_part.done", map[string]any{
+				s.respEvent("response.reasoning_summary_part.done", map[string]any{
 					"item_id": it.id, "output_index": it.index, "summary_index": 0,
 					"part": map[string]any{"type": "summary_text", "text": it.text.String()},
 				}))
 		}
 	default:
 		evs = append(evs,
-			respEvent("response.output_text.done", map[string]any{
+			s.respEvent("response.output_text.done", map[string]any{
 				"item_id": it.id, "output_index": it.index, "content_index": 0,
 				"text": it.text.String(),
 			}),
-			respEvent("response.content_part.done", map[string]any{
+			s.respEvent("response.content_part.done", map[string]any{
 				"item_id": it.id, "output_index": it.index, "content_index": 0,
 				"part": map[string]any{"type": "output_text", "text": it.text.String()},
 			}))
 	}
-	return append(evs, respEvent("response.output_item.done", map[string]any{
+	return append(evs, s.respEvent("response.output_item.done", map[string]any{
 		"output_index": it.index, "item": it.snapshot(),
 	}))
 }
@@ -315,8 +320,8 @@ func (s *msgToResp) feed(event string, obj map[string]any) []stream.Event {
 		}
 		s.started = true
 		evs = append(evs,
-			respEvent("response.created", map[string]any{"response": s.responseShell()}),
-			respEvent("response.in_progress", map[string]any{"response": s.responseShell()}),
+			s.respEvent("response.created", map[string]any{"response": s.responseShell()}),
+			s.respEvent("response.in_progress", map[string]any{"response": s.responseShell()}),
 		)
 	case "content_block_start":
 		idx, _ := jsonx.Int(obj["index"])
@@ -335,19 +340,19 @@ func (s *msgToResp) feed(event string, obj map[string]any) []stream.Event {
 		case "text_delta":
 			text := jsonx.GetString(delta, "text")
 			it.text.WriteString(text)
-			evs = append(evs, respEvent("response.output_text.delta", map[string]any{
+			evs = append(evs, s.respEvent("response.output_text.delta", map[string]any{
 				"item_id": it.id, "output_index": it.index, "content_index": 0, "delta": text,
 			}))
 		case "input_json_delta":
 			part := jsonx.GetString(delta, "partial_json")
 			it.text.WriteString(part)
-			evs = append(evs, respEvent("response.function_call_arguments.delta", map[string]any{
+			evs = append(evs, s.respEvent("response.function_call_arguments.delta", map[string]any{
 				"item_id": it.id, "output_index": it.index, "delta": part,
 			}))
 		case "thinking_delta":
 			thinking := jsonx.GetString(delta, "thinking")
 			it.text.WriteString(thinking)
-			evs = append(evs, respEvent("response.reasoning_summary_text.delta", map[string]any{
+			evs = append(evs, s.respEvent("response.reasoning_summary_text.delta", map[string]any{
 				"item_id": it.id, "output_index": it.index, "summary_index": 0, "delta": thinking,
 			}))
 		case "signature_delta":
@@ -421,7 +426,7 @@ func (s *msgToResp) complete() []stream.Event {
 		typ = "response.incomplete"
 		resp["incomplete_details"] = map[string]any{"reason": "max_output_tokens"}
 	}
-	return append(evs, respEvent(typ, map[string]any{"response": resp}))
+	return append(evs, s.respEvent(typ, map[string]any{"response": resp}))
 }
 
 // finishFromSource completes the turn for a source that closed itself with the
