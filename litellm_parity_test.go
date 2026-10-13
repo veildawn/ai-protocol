@@ -658,3 +658,23 @@ func TestChatToMessagesCoercesToolSchema(t *testing.T) {
 		t.Fatalf("schema = %#v, want a properties object", schema)
 	}
 }
+
+// An Anthropic-native tool owns a reserved name the provider defines; rewriting
+// it into a function tool would drop the type that names it.
+func TestMessagesToChatKeepsHostedTools(t *testing.T) {
+	for _, hosted := range []string{"web_search_20260209", "bash_20250124", "text_editor_20250728"} {
+		body := `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":"x"}],"tools":[{"type":"` + hosted + `","name":"t"}]}`
+		out, err := ConvertRequest(Messages, Chat, []byte(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(out.Body, &m); err != nil {
+			t.Fatal(err)
+		}
+		tool := m["tools"].([]any)[0].(map[string]any)
+		if tool["type"] != hosted {
+			t.Fatalf("hosted tool %s became %#v", hosted, tool)
+		}
+	}
+}

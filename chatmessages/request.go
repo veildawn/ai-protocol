@@ -404,6 +404,23 @@ func anthropicToolNameMap(v any) map[string]string {
 	return out
 }
 
+// anthropicHostedTools are the Anthropic-native tool types. Each owns a
+// reserved name the provider defines, so a tool of one of these types is
+// forwarded as it stands rather than rewritten into a function tool.
+var anthropicHostedTools = []string{
+	"web_search", "bash", "text_editor", "code_execution",
+	"web_fetch", "memory", "tool_search_tool",
+}
+
+func isAnthropicHostedTool(t string) bool {
+	for _, hosted := range anthropicHostedTools {
+		if strings.HasPrefix(t, hosted) {
+			return true
+		}
+	}
+	return false
+}
+
 func openaiToolsToAnthropic(v any, nameMap map[string]string) []any {
 	list, ok := jsonx.AsSlice(v)
 	if !ok {
@@ -452,7 +469,9 @@ func anthropicToolsToOpenAI(v any) []any {
 			continue
 		}
 		t := jsonx.GetString(m, "type")
-		if strings.HasPrefix(t, "web_search") || jsonx.GetString(m, "name") == "web_search" {
+		if isAnthropicHostedTool(t) {
+			// A hosted tool owns a reserved name the provider defines; rewriting
+			// it into a function tool would drop the type that names it.
 			out = append(out, m)
 			continue
 		}
