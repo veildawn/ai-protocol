@@ -422,11 +422,7 @@ func openaiToolsToAnthropic(v any, nameMap map[string]string) []any {
 				if d := jsonx.GetString(fn, "description"); d != "" {
 					tool["description"] = d
 				}
-				if p, ok := fn["parameters"]; ok {
-					tool["input_schema"] = p
-				} else {
-					tool["input_schema"] = map[string]any{"type": "object", "properties": map[string]any{}}
-				}
+				tool["input_schema"] = sanitizeInputSchemaForAnthropic(fn["parameters"])
 				if st, ok := fn["strict"]; ok {
 					tool["strict"] = st
 				}

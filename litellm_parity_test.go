@@ -609,3 +609,52 @@ func TestChatToMessagesSplitsCacheFromInputTokens(t *testing.T) {
 		t.Fatalf("cache_creation_input_tokens = %#v", usage)
 	}
 }
+
+// An Anthropic tool input_schema accepts a fixed key set and only `$defs` as a
+// ref target, so a legacy definition has to be inlined before the block that
+// carried it is dropped.
+func TestChatToMessagesSanitizesToolSchema(t *testing.T) {
+	body := `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":"x"}],"tools":[{"type":"function","function":{"name":"f","parameters":{"properties":{"a":{"$ref":"#/definitions/T"}},"definitions":{"T":{"type":"string"}},"title":"drop me"}}}]}`
+	out, err := ConvertRequest(Chat, Messages, []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out.Body, &m); err != nil {
+		t.Fatal(err)
+	}
+	schema := m["tools"].([]any)[0].(map[string]any)["input_schema"].(map[string]any)
+	if schema["type"] != "object" {
+		t.Fatalf("schema type = %#v, want object", schema["type"])
+	}
+	if _, present := schema["definitions"]; present {
+		t.Fatalf("legacy definitions kept: %#v", schema)
+	}
+	if _, present := schema["title"]; present {
+		t.Fatalf("a key outside the accepted set was kept: %#v", schema)
+	}
+	prop := schema["properties"].(map[string]any)["a"].(map[string]any)
+	if prop["type"] != "string" {
+		t.Fatalf("ref not inlined: %#v", prop)
+	}
+}
+
+// A schema that is not already an object schema is coerced to one.
+func TestChatToMessagesCoercesToolSchema(t *testing.T) {
+	body := `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":"x"}],"tools":[{"type":"function","function":{"name":"f"}}]}`
+	out, err := ConvertRequest(Chat, Messages, []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out.Body, &m); err != nil {
+		t.Fatal(err)
+	}
+	schema := m["tools"].([]any)[0].(map[string]any)["input_schema"].(map[string]any)
+	if schema["type"] != "object" {
+		t.Fatalf("schema = %#v, want an object schema", schema)
+	}
+	if _, ok := schema["properties"]; !ok {
+		t.Fatalf("schema = %#v, want a properties object", schema)
+	}
+}
