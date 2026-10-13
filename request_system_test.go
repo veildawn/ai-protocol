@@ -99,7 +99,7 @@ func TestChatResponsesSystemRoundTrips(t *testing.T) {
 			map[string]any{"role": "user", "content": "again"},
 		}}
 		responses := convertReq(t, Chat, Responses, original)
-		if responses["instructions"] != "first rule\nsecond rule" {
+		if responses["instructions"] != "first rule second rule" {
 			t.Fatalf("instructions=%v", responses["instructions"])
 		}
 		if len(responses["input"].([]any)) != 3 {
@@ -107,7 +107,7 @@ func TestChatResponsesSystemRoundTrips(t *testing.T) {
 		}
 		chat := convertReq(t, Responses, Chat, responses)
 		want := []any{
-			map[string]any{"role": "system", "content": "first rule\nsecond rule"},
+			map[string]any{"role": "system", "content": "first rule second rule"},
 			map[string]any{"role": "user", "content": "first"},
 			map[string]any{"role": "assistant", "content": "reply"},
 			map[string]any{"role": "user", "content": "again"},

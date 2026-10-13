@@ -221,7 +221,9 @@ func chatMessagesToResponsesInput(msgs []any) (instructions string, input []any)
 			"content": chatContentToInputParts(m["content"]),
 		})
 	}
-	return strings.Join(inst, "\n"), input
+	// Multiple system turns concatenate with a space, the separator the
+	// reference uses for a folded instruction string.
+	return strings.Join(inst, " "), input
 }
 
 func appendInstruction(instructions []string, text string) []string {
@@ -280,10 +282,17 @@ func responsesInputToChatMessages(input any) ([]any, []string) {
 		typ := jsonx.GetString(m, "type")
 		switch typ {
 		case "function_call_output":
+			// A tool message must name the call it answers; without one the
+			// upstream rejects the whole request, so an item with no call id
+			// contributes nothing rather than an invalid turn.
+			callID := jsonx.GetString(m, "call_id")
+			if callID == "" {
+				continue
+			}
 			msgs = append(msgs, map[string]any{
 				"role":         "tool",
-				"tool_call_id": jsonx.GetString(m, "call_id"),
-				"content":      functionCallOutputText(m["output"]),
+				"tool_call_id": callID,
+				"content":      functionCallOutputContent(m["output"]),
 			})
 		case "function_call":
 			call := map[string]any{
@@ -404,7 +413,21 @@ func partsToChatContent(content any, role string) (any, bool) {
 		case "input_image":
 			hasNonText = true
 			url := jsonx.GetString(pm, "image_url")
-			parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": url}})
+			if iu, ok := jsonx.AsMap(pm["image_url"]); ok {
+				url = jsonx.GetString(iu, "url")
+			}
+			img := map[string]any{"type": "image_url", "image_url": map[string]any{"url": url}}
+			if d := jsonx.GetString(pm, "detail"); d != "" {
+				img["image_url"].(map[string]any)["detail"] = d
+			}
+			parts = append(parts, img)
+		case "input_file":
+			// A chat upstream reads a file's bytes as an image_url data URL;
+			// dropping the part would lose the attachment entirely.
+			if url := inputFileToDataURL(pm); url != "" {
+				hasNonText = true
+				parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": url}})
+			}
 		}
 	}
 	if !hasNonText {
@@ -436,6 +459,65 @@ func partsToText(content any, types ...string) string {
 		}
 	}
 	return strings.Join(parts, "\n")
+}
+
+// functionCallOutputContent renders a Responses function_call_output for the
+// chat wire. A plain string output stays a string. A part list becomes a
+// content-part array when it carries media — flattening an image to its JSON
+// would lose it — and a joined string when it is text only.
+func functionCallOutputContent(v any) any {
+	list, ok := jsonx.AsSlice(v)
+	if !ok {
+		return functionCallOutputText(v)
+	}
+	var texts []string
+	var parts []any
+	hasMedia := false
+	for _, p := range list {
+		pm, ok := jsonx.AsMap(p)
+		if !ok {
+			if b, err := jsonx.Marshal(p); err == nil {
+				texts = append(texts, string(b))
+				parts = append(parts, map[string]any{"type": "text", "text": string(b)})
+			}
+			continue
+		}
+		switch jsonx.GetString(pm, "type") {
+		case "input_text", "output_text", "text", "":
+			t := jsonx.GetString(pm, "text")
+			texts = append(texts, t)
+			parts = append(parts, map[string]any{"type": "text", "text": t})
+		case "input_image", "image_url":
+			url := jsonx.GetString(pm, "image_url")
+			if iu, ok := jsonx.AsMap(pm["image_url"]); ok {
+				url = jsonx.GetString(iu, "url")
+			}
+			if url != "" {
+				hasMedia = true
+				parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": url}})
+			}
+		case "input_file":
+			// The chat wire has no file part on a tool message; the bytes ride
+			// a data URL, which is what a chat upstream reads for a PDF.
+			if url := inputFileToDataURL(pm); url != "" {
+				hasMedia = true
+				parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": url}})
+			}
+		}
+	}
+	if !hasMedia {
+		return strings.Join(texts, "\n")
+	}
+	return parts
+}
+
+// inputFileToDataURL renders a Responses input_file part as a data URL for the
+// chat wire, which carries a file's bytes as an image_url data URL.
+func inputFileToDataURL(pm map[string]any) string {
+	if data := jsonx.GetString(pm, "file_data"); data != "" {
+		return data
+	}
+	return jsonx.GetString(pm, "file_url")
 }
 
 // functionCallOutputText renders a Responses function_call_output for the chat
@@ -554,9 +636,7 @@ func chatToolsToResponses(v any) []any {
 			tool := map[string]any{"type": "function"}
 			if fn != nil {
 				tool["name"] = jsonx.GetString(fn, "name")
-				if d := jsonx.GetString(fn, "description"); d != "" {
-					tool["description"] = d
-				}
+				tool["description"] = jsonx.GetString(fn, "description")
 				if p, ok := fn["parameters"]; ok {
 					tool["parameters"] = p
 				}
@@ -565,10 +645,6 @@ func chatToolsToResponses(v any) []any {
 				}
 			}
 			out = append(out, tool)
-			continue
-		}
-		if strings.HasPrefix(jsonx.GetString(m, "type"), "web_search") || jsonx.GetString(m, "name") == "web_search" {
-			out = append(out, map[string]any{"type": "web_search_preview"})
 			continue
 		}
 		out = append(out, m)
