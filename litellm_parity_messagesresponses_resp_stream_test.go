@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/veildawn/ai-protocol/internal/thinksig"
 )
 
 // This file pins the Messages→Responses folds a LiteLLM v1.100.1 audit found
@@ -655,7 +657,7 @@ func TestResponsesToMessagesNoSignatureDelta(t *testing.T) {
 
 // A thinking block opens unsigned, with the empty signature the reference's
 // adapter puts on the wire from the first frame.
-func TestResponsesToMessagesThinkingBlockStartsUnsigned(t *testing.T) {
+func TestResponsesToMessagesThinkingBlockStartsWithStandInSignature(t *testing.T) {
 	src := strings.Join([]string{
 		`event: response.created`,
 		`data: {"type":"response.created","response":{"id":"r1","model":"m"}}`,
@@ -679,8 +681,8 @@ func TestResponsesToMessagesThinkingBlockStartsUnsigned(t *testing.T) {
 		if block["type"] != "thinking" {
 			continue
 		}
-		if block["thinking"] != "" || block["signature"] != "" {
-			t.Fatalf("thinking block = %#v, want empty thinking and signature", block)
+		if block["thinking"] != "" || block["signature"] != thinksig.Synthetic {
+			t.Fatalf("thinking block = %#v, want empty thinking and the fold's stand-in signature", block)
 		}
 		return
 	}

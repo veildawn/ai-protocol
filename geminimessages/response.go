@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/veildawn/ai-protocol/internal/jsonx"
+	"github.com/veildawn/ai-protocol/internal/thinksig"
 )
 
 // GeminiResponseToMessages folds a gemini generateContent response into an
@@ -205,7 +206,11 @@ func geminiCandidateBlocks(c map[string]any) (blocks []any, hasCalls bool) {
 			// thinking block outright.
 			continue
 		}
-		sig := any("")
+		// A thought signature the source stated rides through; an unsigned
+		// thought gets the fold's stand-in rather than "", which Messages
+		// clients read as "no signature" and answer by downgrading the
+		// thinking to text on replay — see internal/thinksig.
+		sig := any(thinksig.Synthetic)
 		if t.hasSig {
 			sig = t.sig
 		}

@@ -293,6 +293,7 @@ var boundarySurfaceAllowlist = map[string][]string{
 		"IsResponsesOnlyTool", "ResponsesOnlyTools", "ThinkingBudget",
 	},
 	"internal/jsonx":    {"ArgsValue", "AsMap", "AsSlice", "Bool", "CloneMap", "GetString", "Int", "JoinText", "Marshal", "String", "UnmarshalMap"},
+	"internal/thinksig": {"Or", "Synthetic"},
 	"messagesresponses": {"MessagesResponseToResponses", "MessagesToResponses", "PipeMessagesToResponses", "PipeResponsesToMessages", "ResponsesRequestToMessages", "ResponsesToMessages", "StreamOpts"},
 	"protocol": {
 		"BodyLosses", "Chat", "ConversionError", "ConversionError.Error", "ConversionError.Unwrap",

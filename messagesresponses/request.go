@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/veildawn/ai-protocol/internal/jsonx"
+	"github.com/veildawn/ai-protocol/internal/thinksig"
 	"github.com/veildawn/ai-protocol/types"
 )
 
@@ -362,43 +363,37 @@ func messagesToInput(msgs []any) []any {
 					blocks = append(blocks, bm)
 				}
 			}
-			// The reasoning and call items come first, a run of consecutive
-			// thinking blocks folding into one reasoning item whose summary
-			// carries every block of the run. The item holds type and summary
-			// only: the Responses reasoning item the reference builds drops the
-			// blocks' signatures rather than guessing at encrypted_content.
+			// A turn folds in the order a Responses replay reads it: every
+			// reasoning item first (each run of consecutive thinking blocks
+			// folding into one item whose summary carries every block of the
+			// run), then the aggregated text as one assistant message, then the
+			// calls — the same reasoning -> message -> calls order the chat
+			// source's fold emits. Appending the text AFTER the calls instead
+			// put an assistant message between a function_call and its
+			// function_call_output; upstreams read that as an interleaving
+			// violation and answer 400, killing every tool loop whose turns
+			// carried text (pi's replay of a thinking block it had to downgrade
+			// to text, among others — 2026-10-14).
+			//
+			// The reasoning item holds type and summary only: the reference's
+			// build drops the blocks' signatures rather than guessing at
+			// encrypted_content.
 			for i := 0; i < len(blocks); {
-				switch jsonx.GetString(blocks[i], "type") {
-				case "thinking":
-					var summary []any
-					for i < len(blocks) && jsonx.GetString(blocks[i], "type") == "thinking" {
-						if th := jsonx.GetString(blocks[i], "thinking"); th != "" {
-							summary = append(summary, map[string]any{"type": "summary_text", "text": th})
-						}
-						i++
-					}
-					if len(summary) > 0 {
-						input = append(input, map[string]any{"type": "reasoning", "summary": summary})
-					}
-				case "tool_use":
-					args, _ := json.Marshal(blocks[i]["input"])
-					if blocks[i]["input"] == nil {
-						args = []byte("{}")
-					}
-					input = append(input, map[string]any{
-						"type":      "function_call",
-						"call_id":   jsonx.GetString(blocks[i], "id"),
-						"name":      jsonx.GetString(blocks[i], "name"),
-						"arguments": string(args),
-					})
+				if jsonx.GetString(blocks[i], "type") != "thinking" {
 					i++
-				default:
+					continue
+				}
+				var summary []any
+				for i < len(blocks) && jsonx.GetString(blocks[i], "type") == "thinking" {
+					if th := jsonx.GetString(blocks[i], "thinking"); th != "" {
+						summary = append(summary, map[string]any{"type": "summary_text", "text": th})
+					}
 					i++
 				}
+				if len(summary) > 0 {
+					input = append(input, map[string]any{"type": "reasoning", "summary": summary})
+				}
 			}
-			// Every text block of the turn then aggregates into one assistant
-			// message appended after the items above, not interleaved between
-			// the calls it sits around.
 			var textParts []any
 			for _, bm := range blocks {
 				if jsonx.GetString(bm, "type") == "text" {
@@ -407,6 +402,21 @@ func messagesToInput(msgs []any) []any {
 			}
 			if len(textParts) > 0 {
 				input = append(input, map[string]any{"type": "message", "role": "assistant", "content": textParts})
+			}
+			for _, bm := range blocks {
+				if jsonx.GetString(bm, "type") != "tool_use" {
+					continue
+				}
+				args, _ := json.Marshal(bm["input"])
+				if bm["input"] == nil {
+					args = []byte("{}")
+				}
+				input = append(input, map[string]any{
+					"type":      "function_call",
+					"call_id":   jsonx.GetString(bm, "id"),
+					"name":      jsonx.GetString(bm, "name"),
+					"arguments": string(args),
+				})
 			}
 		}
 	}
@@ -696,11 +706,13 @@ func thinkingFromReasoning(m map[string]any) []any {
 				text = jsonx.String(p)
 			}
 			if text != "" {
-				// The signature stays null: only Anthropic can sign a thinking
-				// block, and a stand-in value would be replayed as a real one
-				// and rejected by every backend that verifies it. The item's
-				// encrypted_content is therefore never folded in.
-				out = append(out, map[string]any{"type": "thinking", "thinking": text, "signature": nil})
+				// The signature is the fold's stand-in, not null: an unsigned
+				// thinking block reads as "no signature" to Messages clients,
+				// which then downgrade the thinking to a TEXT block on replay
+				// (pi's exact behavior) — see internal/thinksig for why that
+				// breaks tool loops and why a stand-in is the honest value on a
+				// fold path. The item's encrypted_content still never folds in.
+				out = append(out, map[string]any{"type": "thinking", "thinking": text, "signature": thinksig.Synthetic})
 			}
 		}
 	}

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/veildawn/ai-protocol/internal/thinksig"
 	"github.com/veildawn/ai-protocol/stream"
 )
 
@@ -310,7 +311,7 @@ func TestGeminiMessagesParityStreamSequence(t *testing.T) {
 	))
 	wantSeq := []string{
 		`{"type":"message_start","message":{"id":"r1","type":"message","role":"assistant","model":"gemini-2.5-pro","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}`,
-		`{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":"dW5zaWduZWQtdGhpbmtpbmc="}}`,
 		`{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"think"}}`,
 		`{"type":"content_block_stop","index":0}`,
 		`{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`,
@@ -607,9 +608,10 @@ func TestGeminiMessagesParityResponseReverseRoundTrip(t *testing.T) {
 	  "stop_reason":"tool_use"}`)
 	gmParityEqual(t, got, want, "reverse response roundtrip")
 
-	// The unsigned thinking block survives its roundtrip as the reference
-	// prints it: a thought part reads back as a thinking block with the
-	// empty signature the Messages dialect always states.
+	// The unsigned thinking block survives its roundtrip as a thinking block
+	// carrying the fold's stand-in signature — an empty signature reads as
+	// "unsigned" to Messages clients, which downgrade the thinking to text on
+	// replay (see internal/thinksig).
 	out, _ = ConvertResponse(Messages, Gemini, []byte(`{"id":"m2","content":[
 	  {"type":"thinking","thinking":"t"},{"type":"text","text":"hello"}],
 	  "stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":2}}`))
@@ -620,8 +622,8 @@ func TestGeminiMessagesParityResponseReverseRoundTrip(t *testing.T) {
 		t.Fatalf("blocks = %#v, want thinking then text", blocks)
 	}
 	th := blocks[0].(map[string]any)
-	if th["thinking"] != "t" || th["signature"] != "" {
-		t.Fatalf("thinking block = %#v, want text t and the stated empty signature", th)
+	if th["thinking"] != "t" || th["signature"] != thinksig.Synthetic {
+		t.Fatalf("thinking block = %#v, want text t and the fold's stand-in signature", th)
 	}
 }
 
@@ -741,7 +743,7 @@ func TestGeminiMessagesParityStreamReverseRoundTrip(t *testing.T) {
 	evs := gmParityPipeEventsOf(t, back.String())
 	wantSeq := []string{
 		`{"type":"message_start","message":{"id":"msg_0","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}`,
-		`{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":"dW5zaWduZWQtdGhpbmtpbmc="}}`,
 		`{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"why"}}`,
 		`{"type":"content_block_stop","index":0}`,
 		`{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`,

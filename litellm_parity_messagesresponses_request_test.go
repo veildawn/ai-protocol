@@ -5,17 +5,21 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/veildawn/ai-protocol/internal/thinksig"
 )
 
 // This file pins the Messages -> Responses request folds a LiteLLM v1.100.1
 // audit found diverging from the reference adapter
 // (litellm/llms/anthropic/experimental_pass_through/responses_adapters).
 
-// The assistant turn's text is one message appended after the turn's other
-// items: litellm aggregates every text block of the message and emits it once,
-// after the reasoning and function_call items derived from the same turn,
-// rather than interleaving a message between the calls it sits around.
-func TestMessagesToResponsesAggregatesAssistantTextAfterCalls(t *testing.T) {
+// The assistant turn's text is one message emitted BEFORE the turn's calls:
+// litellm aggregates every text block and appends it after the function_call
+// items, but an assistant message sitting between a function_call and its
+// function_call_output reads as an interleaving violation to Responses
+// upstreams and draws a 400 — the fold deliberately diverges from the
+// reference here (2026-10-14: every text-bearing tool turn died on replay).
+func TestMessagesToResponsesAggregatesAssistantTextBeforeCalls(t *testing.T) {
 	body := `{"model":"m","max_tokens":10,"messages":[{"role":"assistant","content":[{"type":"text","text":"T1"},{"type":"tool_use","id":"t1","name":"fn","input":{"a":1}},{"type":"text","text":"T2"}]}]}`
 	out, err := ConvertRequest(Messages, Responses, []byte(body))
 	if err != nil {
@@ -27,14 +31,11 @@ func TestMessagesToResponsesAggregatesAssistantTextAfterCalls(t *testing.T) {
 	}
 	input, ok := m["input"].([]any)
 	if !ok || len(input) != 2 {
-		t.Fatalf("input = %#v, want the call then one aggregated message", m["input"])
+		t.Fatalf("input = %#v, want one aggregated message then the call", m["input"])
 	}
-	if first := input[0].(map[string]any); first["type"] != "function_call" {
-		t.Fatalf("first item = %#v, want the function_call", first)
-	}
-	msg := input[1].(map[string]any)
+	msg := input[0].(map[string]any)
 	if msg["type"] != "message" || msg["role"] != "assistant" {
-		t.Fatalf("second item = %#v, want the assistant message", msg)
+		t.Fatalf("first item = %#v, want the assistant message", msg)
 	}
 	parts := msg["content"].([]any)
 	if len(parts) != 2 {
@@ -43,11 +44,14 @@ func TestMessagesToResponsesAggregatesAssistantTextAfterCalls(t *testing.T) {
 	if parts[0].(map[string]any)["text"] != "T1" || parts[1].(map[string]any)["text"] != "T2" {
 		t.Fatalf("parts = %#v, want both text blocks aggregated", parts)
 	}
+	if second := input[1].(map[string]any); second["type"] != "function_call" {
+		t.Fatalf("second item = %#v, want the function_call after the message", second)
+	}
 }
 
 // Text surrounding both a thinking block and a call still lands in one
-// message, behind the reasoning item and the call.
-func TestMessagesToResponsesTextAfterThinkingAndCall(t *testing.T) {
+// message, behind the reasoning item and ahead of the call.
+func TestMessagesToResponsesTextAroundThinkingAndCall(t *testing.T) {
 	body := `{"model":"m","max_tokens":10,"messages":[{"role":"assistant","content":[{"type":"text","text":"A"},{"type":"thinking","thinking":"th"},{"type":"tool_use","id":"t2","name":"fn","input":{}},{"type":"text","text":"B"}]}]}`
 	out, err := ConvertRequest(Messages, Responses, []byte(body))
 	if err != nil {
@@ -61,13 +65,15 @@ func TestMessagesToResponsesTextAfterThinkingAndCall(t *testing.T) {
 	for _, item := range m["input"].([]any) {
 		types = append(types, item.(map[string]any)["type"].(string))
 	}
-	if strings.Join(types, ",") != "reasoning,function_call,message" {
-		t.Fatalf("input order = %v, want reasoning, call, then the message", types)
+	if strings.Join(types, ",") != "reasoning,message,function_call" {
+		t.Fatalf("input order = %v, want reasoning, the message, then the call", types)
 	}
 }
 
 // A run of consecutive thinking blocks is one reasoning item whose summary
 // carries every block of the run; a later lone thinking block is its own item.
+// All reasoning precedes the text message and the calls, whatever order the
+// blocks arrived in.
 func TestMessagesToResponsesFoldsThinkingRuns(t *testing.T) {
 	body := `{"model":"m","max_tokens":10,"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"A"},{"type":"thinking","thinking":"B"},{"type":"text","text":"hi"},{"type":"thinking","thinking":"C"},{"type":"tool_use","id":"t3","name":"fn","input":{}}]}]}`
 	out, err := ConvertRequest(Messages, Responses, []byte(body))
@@ -83,8 +89,8 @@ func TestMessagesToResponsesFoldsThinkingRuns(t *testing.T) {
 	for _, item := range input {
 		types = append(types, item.(map[string]any)["type"].(string))
 	}
-	if strings.Join(types, ",") != "reasoning,reasoning,function_call,message" {
-		t.Fatalf("input order = %v, want two reasoning items, the call, the message", types)
+	if strings.Join(types, ",") != "reasoning,reasoning,message,function_call" {
+		t.Fatalf("input order = %v, want two reasoning items, the message, the call", types)
 	}
 	first := input[0].(map[string]any)["summary"].([]any)
 	if len(first) != 2 {
@@ -227,11 +233,14 @@ func TestResponsesToMessagesDropsCustomToolCall(t *testing.T) {
 	}
 }
 
-// A thinking block folded from a reasoning item carries signature null — only
-// Anthropic can sign one, so the item's encrypted_content never rides along —
-// and a summary with no readable text contributes nothing rather than a
-// synthesized redacted block.
-func TestResponsesToMessagesThinkingSignatureStaysNull(t *testing.T) {
+// A thinking block folded from a reasoning item carries the fold's stand-in
+// signature rather than null — an unsigned block reads as "no signature" to
+// Messages clients, which downgrade the thinking to text on replay (see
+// internal/thinksig) — and a summary with no readable text contributes nothing
+// rather than a synthesized redacted block. This deliberately diverges from
+// litellm's null signature, which is the behavior that broke replaying
+// clients.
+func TestResponsesToMessagesThinkingCarriesStandInSignature(t *testing.T) {
 	body := `{"id":"r1","status":"completed","output":[{"type":"reasoning","summary":[{"type":"summary_text","text":"why"}],"encrypted_content":"ENC"},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}]}`
 	out, err := ConvertResponse(Responses, Messages, []byte(body))
 	if err != nil {
@@ -245,8 +254,8 @@ func TestResponsesToMessagesThinkingSignatureStaysNull(t *testing.T) {
 	if block["type"] != "thinking" || block["thinking"] != "why" {
 		t.Fatalf("block = %#v, want the thinking block", block)
 	}
-	if v, present := block["signature"]; !present || v != nil {
-		t.Fatalf("signature = %#v (present=%v), want an explicit null", v, present)
+	if v, present := block["signature"]; !present || v != thinksig.Synthetic {
+		t.Fatalf("signature = %#v (present=%v), want the fold's stand-in", v, present)
 	}
 
 	empty := `{"id":"r1","status":"completed","output":[{"type":"reasoning","summary":[],"encrypted_content":"ENC"}]}`

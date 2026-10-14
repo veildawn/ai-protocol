@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/veildawn/ai-protocol/internal/jsonx"
+	"github.com/veildawn/ai-protocol/internal/thinksig"
 )
 
 func ChatResponseToMessages(body map[string]any) map[string]any {
@@ -124,9 +125,10 @@ func openaiChoicesToAnthropicContent(choices []any) []any {
 				content = append(content, rebuildThinkingBlock(tm))
 			}
 		} else if rc := jsonx.GetString(msg, "reasoning_content"); rc != "" {
-			// The block states its signature even here — as a null, the
-			// unsigned spelling on the Messages wire.
-			content = append(content, map[string]any{"type": "thinking", "thinking": rc, "signature": nil})
+			// The block opens with the fold's stand-in signature: a null reads
+			// as "unsigned" to Messages clients, which downgrade the thinking
+			// to text on replay — see internal/thinksig.
+			content = append(content, map[string]any{"type": "thinking", "thinking": rc, "signature": thinksig.Synthetic})
 		}
 		if msg["content"] != nil {
 			// A chat message's content is a string or a part list. A list must
@@ -206,20 +208,18 @@ func chatContentToText(content any) string {
 // rebuildThinkingBlock re-emits a chat thinking block in the fixed Messages
 // shape: {type, thinking, signature} for a thinking block, {type, data} for a
 // redacted one. Extra chat-side keys (a cache_control marker, say) do not ride
-// along, and the signature is always stated — an absent one as "" (the block
-// says "unsigned"), an explicit null as null.
+// along. A signature the source stated keeps its value; an unsigned block gets
+// the fold's stand-in rather than ""/null, which Messages clients read as "no
+// signature" and answer by downgrading the thinking to text on replay — see
+// internal/thinksig.
 func rebuildThinkingBlock(block map[string]any) map[string]any {
 	if jsonx.GetString(block, "type") == "redacted_thinking" {
 		return map[string]any{"type": "redacted_thinking", "data": jsonx.GetString(block, "data")}
 	}
-	sig, present := block["signature"]
-	if !present {
-		sig = ""
-	}
 	return map[string]any{
 		"type":      "thinking",
 		"thinking":  jsonx.GetString(block, "thinking"),
-		"signature": sig,
+		"signature": thinksig.Or(jsonx.GetString(block, "signature")),
 	}
 }
 

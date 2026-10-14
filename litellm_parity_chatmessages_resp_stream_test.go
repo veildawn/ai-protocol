@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/veildawn/ai-protocol/internal/thinksig"
 )
 
 // This file pins the chat<->messages folds a LiteLLM v1.100.1 audit found
@@ -399,8 +401,8 @@ func TestChatToMessagesFoldsFixedBlockShapes(t *testing.T) {
 	}
 	block := m["content"].([]any)[0].(map[string]any)
 	sig, present := block["signature"]
-	if !present || sig != nil {
-		t.Fatalf("reasoning_content fallback block = %#v, want signature:null stated", block)
+	if !present || sig != thinksig.Synthetic {
+		t.Fatalf("reasoning_content fallback block = %#v, want the fold's stand-in signature", block)
 	}
 
 	body = `{"id":"c1","model":"m","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":null,"thinking_blocks":[{"type":"thinking","thinking":"why","cache_control":{"type":"ephemeral"}}]}}]}`
@@ -415,8 +417,8 @@ func TestChatToMessagesFoldsFixedBlockShapes(t *testing.T) {
 	if _, extra := block["cache_control"]; extra {
 		t.Fatalf("extra keys rode along: %#v", block)
 	}
-	if block["signature"] != "" {
-		t.Fatalf("unsigned thinking block = %#v, want signature:\"\" stated", block)
+	if block["signature"] != thinksig.Synthetic {
+		t.Fatalf("unsigned thinking block = %#v, want the fold's stand-in signature", block)
 	}
 	if len(block) != 3 {
 		t.Fatalf("thinking block = %#v, want exactly type/thinking/signature", block)
@@ -454,8 +456,8 @@ func TestChatToMessagesStreamFrameShapesMatchReference(t *testing.T) {
 	for _, e := range chatMsgParityEvents(t, dst.String()) {
 		if e["type"] == "content_block_start" {
 			if cb, ok := e["content_block"].(map[string]any); ok && cb["type"] == "thinking" {
-				if cb["signature"] != "" {
-					t.Fatalf("thinking start = %#v, want signature:\"\" stated", cb)
+				if cb["signature"] != thinksig.Synthetic {
+					t.Fatalf("thinking start = %#v, want the fold's stand-in signature", cb)
 				}
 			}
 		}

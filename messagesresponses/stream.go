@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/veildawn/ai-protocol/internal/jsonx"
+	"github.com/veildawn/ai-protocol/internal/thinksig"
 	"github.com/veildawn/ai-protocol/stream"
 )
 
@@ -757,9 +758,14 @@ func (s *respToMsg) feed(event string, obj map[string]any) []stream.Event {
 		if text == "" && !(s.blockOpen && s.blockType == "thinking") {
 			break
 		}
-		// The thinking block opens unsigned (signature ""), matching the
-		// reference's adapter; the fold never synthesizes a signature for it.
-		evs = append(evs, s.ensure("thinking", map[string]any{"type": "thinking", "thinking": "", "signature": ""})...)
+		// The thinking block opens with the fold's stand-in signature: an
+		// unsigned block ("" or null) reads as "no signature" to Messages
+		// clients, which then downgrade the thinking to text on replay and
+		// break the next request's tool pairing — see internal/thinksig. The
+		// value rides the content_block_start frame; no signature_delta
+		// follows, and clients that seed the block from the start frame (pi,
+		// the Anthropic SDKs) keep it as-is.
+		evs = append(evs, s.ensure("thinking", map[string]any{"type": "thinking", "thinking": "", "signature": thinksig.Synthetic})...)
 		evs = append(evs, stream.Event{Event: "content_block_delta", Data: mustJSON(map[string]any{
 			"type": "content_block_delta", "index": s.blockIndex,
 			"delta": map[string]any{"type": "thinking_delta", "thinking": text},

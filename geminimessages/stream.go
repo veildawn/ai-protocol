@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/veildawn/ai-protocol/internal/jsonx"
+	"github.com/veildawn/ai-protocol/internal/thinksig"
 	"github.com/veildawn/ai-protocol/stream"
 )
 
@@ -447,10 +448,11 @@ func (s *geminiToMessagesState) feed(obj map[string]any) []stream.Event {
 	}
 
 	for _, th := range thoughts {
-		evs = append(evs, s.ensureBlock("thinking", map[string]any{"type": "thinking", "thinking": "", "signature": ""})...)
-		// A signature on a streamed thought rides the chat delta's provider
+		// A signature on a streamed thought rides the source's provider
 		// fields, which the composed fold never reads back — the block opens
-		// unsigned and stays that way.
+		// with the fold's stand-in instead of unsigned, so replaying clients
+		// keep it as thinking (see internal/thinksig).
+		evs = append(evs, s.ensureBlock("thinking", map[string]any{"type": "thinking", "thinking": "", "signature": thinksig.Synthetic})...)
 		evs = append(evs, s.delta(map[string]any{"type": "thinking_delta", "thinking": th}))
 	}
 	if hasText {

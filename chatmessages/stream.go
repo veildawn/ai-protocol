@@ -5,6 +5,7 @@ import (
 	"io"
 
 	"github.com/veildawn/ai-protocol/internal/jsonx"
+	"github.com/veildawn/ai-protocol/internal/thinksig"
 	"github.com/veildawn/ai-protocol/stream"
 )
 
@@ -187,8 +188,12 @@ func (s *chatToMsgState) feedChatChunk(obj map[string]any) []stream.Event {
 		}
 		if sawThinking {
 			if !(s.blockOpen && s.blockType == "thinking") {
+				// An unsigned chunk (no signature on the wire) opens with the
+				// fold's stand-in rather than "": clients read an unsigned
+				// block as "no signature" and downgrade the thinking to text on
+				// replay — see internal/thinksig.
 				evs = append(evs, s.ensureBlock("thinking", map[string]any{
-					"type": "thinking", "thinking": firstText, "signature": firstSig,
+					"type": "thinking", "thinking": firstText, "signature": thinksig.Or(firstSig),
 				})...)
 			}
 			d := map[string]any{"type": "thinking_delta", "thinking": aggText}
@@ -204,8 +209,10 @@ func (s *chatToMsgState) feedChatChunk(obj map[string]any) []stream.Event {
 	}
 	if !thinkingBlocks {
 		if rc := jsonx.GetString(delta, "reasoning_content"); rc != "" {
+			// reasoning_content carries no signature at all, so the block opens
+			// with the fold's stand-in — see internal/thinksig.
 			evs = append(evs, s.ensureBlock("thinking", map[string]any{
-				"type": "thinking", "thinking": "", "signature": "",
+				"type": "thinking", "thinking": "", "signature": thinksig.Synthetic,
 			})...)
 			evs = append(evs, stream.Event{Event: "content_block_delta", Data: mustJSON(map[string]any{
 				"type": "content_block_delta", "index": s.blockIndex,

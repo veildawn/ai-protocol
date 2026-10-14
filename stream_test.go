@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/veildawn/ai-protocol/internal/thinksig"
 )
 
 func TestPipeChatToMessagesText(t *testing.T) {
@@ -770,15 +772,17 @@ func TestPipeChatToMessagesTerminatesOnce(t *testing.T) {
 	}
 }
 
-// A reasoning item's opaque bytes arrive on output_item.done, but the
+// A reasoning item's opaque bytes arrive on output_item.done, and the
 // reference's Messages adapter (litellm v1.100.1
 // responses_adapters/streaming_iterator.py — it has no signature_delta
-// emission at all) never re-signs them: the thinking block opens unsigned,
-// relays its delta, and closes at the item's done event. The turn the client
-// holds is complete — the fold simply does not fabricate a signature only
-// Anthropic could have produced. This test used to demand the fabricated
-// signature_delta.
-func TestPipeResponsesToMessagesEmitsSignatureDelta(t *testing.T) {
+// emission at all) never re-signs them. The fold still opens the thinking
+// block with the stand-in signature on the content_block_start frame — an
+// unsigned open reads as "no signature" to Messages clients, which downgrade
+// the thinking to text on replay (see internal/thinksig) — but emits no
+// signature_delta: the value on the start frame is the whole signature, and
+// clients that seed from the start frame keep it. The old unsigned open broke
+// every replaying tool loop through a translating gateway (2026-10-14).
+func TestPipeResponsesToMessagesOpensThinkingWithStandInSignature(t *testing.T) {
 	src := strings.Join([]string{
 		`data: {"type":"response.created","response":{"id":"r1","model":"m"}}`,
 		``,
@@ -805,8 +809,8 @@ func TestPipeResponsesToMessagesEmitsSignatureDelta(t *testing.T) {
 		case "content_block_start":
 			if b, ok := e["content_block"].(map[string]any); ok && b["type"] == "thinking" {
 				thinkingAt = i
-				if b["signature"] != "" {
-					t.Fatalf("thinking block = %#v, want the unsigned open", b)
+				if b["signature"] != thinksig.Synthetic {
+					t.Fatalf("thinking block = %#v, want the stand-in open", b)
 				}
 			}
 		case "content_block_delta":

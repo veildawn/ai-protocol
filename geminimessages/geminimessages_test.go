@@ -297,7 +297,7 @@ func TestPipeGeminiToMessagesSequence(t *testing.T) {
 	}, "event types")
 
 	assertEqual(t, decode(t, evs[1].Data), decode(t, `{"type":"content_block_start","index":0,
-		"content_block":{"type":"thinking","thinking":"","signature":""}}`), "thinking start")
+		"content_block":{"type":"thinking","thinking":"","signature":"dW5zaWduZWQtdGhpbmtpbmc="}}`), "thinking start")
 	assertEqual(t, decode(t, evs[2].Data), decode(t, `{"type":"content_block_delta","index":0,
 		"delta":{"type":"thinking_delta","thinking":"think"}}`), "thinking delta")
 	assertEqual(t, decode(t, evs[4].Data), decode(t, `{"type":"content_block_start","index":1,
