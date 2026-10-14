@@ -424,6 +424,21 @@ func assistantFoldEntry(m map[string]any) (foldEntry, bool) {
 		parts = append(parts, map[string]any{"text": stringContent})
 	}
 	calls := map[string]string{}
+	// The signature a call part needs when the tool_use block carried none:
+	// the turn's own thinking-block signature. The target rejects a replayed
+	// functionCall part without a thoughtSignature (INVALID_ARGUMENT, verified
+	// against the live upstream), and a Messages client that round-trips
+	// thinking blocks but drops the tool_use's provider_specific_fields — the
+	// common client behavior this fold was measured against — still carries
+	// the turn's reasoning signature, so lifting it onto the call is the one
+	// spelling that keeps the replay valid.
+	turnSig := ""
+	for i := len(thinks) - 1; i >= 0; i-- {
+		if thinks[i].sig != "" {
+			turnSig = thinks[i].sig
+			break
+		}
+	}
 	for _, u := range uses {
 		if u.id == "" {
 			continue
@@ -432,6 +447,9 @@ func assistantFoldEntry(m map[string]any) (foldEntry, bool) {
 		part := map[string]any{"function_call": map[string]any{"name": u.name}}
 		if u.hasArgs {
 			part["function_call"].(map[string]any)["args"] = u.args
+		}
+		if u.sig == "" {
+			u.sig = turnSig
 		}
 		if u.sig != "" {
 			part["thoughtSignature"] = u.sig

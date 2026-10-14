@@ -189,6 +189,52 @@ func TestGeminiMessagesParityRequestThinkingBlocks(t *testing.T) {
 	gmParityEqual(t, got, want, "unsigned thinking block fold")
 }
 
+// A call whose tool_use block carried no signature is lifted the turn's
+// thinking-block signature: the target rejects a replayed functionCall part
+// without one (INVALID_ARGUMENT, verified against the live upstream), and the
+// client this fold serves round-trips thinking signatures but drops the
+// tool_use's provider_specific_fields. The call's own signature, when the
+// client did preserve it, wins over the lift.
+func TestGeminiMessagesParityCallSignatureLift(t *testing.T) {
+	got := gmParityFold(t, `{"model":"m","max_tokens":8,"messages":[
+	    {"role":"user","content":"q"},
+	    {"role":"assistant","content":[
+	      {"type":"thinking","thinking":"why","signature":"TSIG"},
+	      {"type":"tool_use","id":"t1","name":"f","input":{"a":1}}]}]}`)
+	want := gmParityDecode(t, `{"contents":[
+	    {"role":"user","parts":[{"text":"q"}]},
+	    {"role":"model","parts":[{"text":"why","thought":true,"thoughtSignature":"TSIG"},
+	      {"function_call":{"name":"f","args":{"a":1}},"thoughtSignature":"TSIG"}]}],
+	  "generationConfig":{"max_output_tokens":8}}`)
+	gmParityEqual(t, got, want, "turn signature lift")
+
+	// The call's own provider-field signature outranks the turn's.
+	got = gmParityFold(t, `{"model":"m","max_tokens":8,"messages":[
+	    {"role":"user","content":"q"},
+	    {"role":"assistant","content":[
+	      {"type":"thinking","thinking":"why","signature":"TSIG"},
+	      {"type":"tool_use","id":"t1","name":"f","input":{},
+	        "provider_specific_fields":{"signature":"CSIG"}}]}]}`)
+	want = gmParityDecode(t, `{"contents":[
+	    {"role":"user","parts":[{"text":"q"}]},
+	    {"role":"model","parts":[{"text":"why","thought":true,"thoughtSignature":"TSIG"},
+	      {"function_call":{"name":"f","args":{}},"thoughtSignature":"CSIG"}]}],
+	  "generationConfig":{"max_output_tokens":8}}`)
+	gmParityEqual(t, got, want, "call signature wins")
+
+	// Nothing anywhere: the call stays unsigned — the fold has no signature
+	// to invent.
+	got = gmParityFold(t, `{"model":"m","max_tokens":8,"messages":[
+	    {"role":"user","content":"q"},
+	    {"role":"assistant","content":[
+	      {"type":"tool_use","id":"t1","name":"f","input":{}}]}]}`)
+	want = gmParityDecode(t, `{"contents":[
+	    {"role":"user","parts":[{"text":"q"}]},
+	    {"role":"model","parts":[{"function_call":{"name":"f","args":{}}}]}],
+	  "generationConfig":{"max_output_tokens":8}}`)
+	gmParityEqual(t, got, want, "no signature to lift")
+}
+
 // The output_format schema strictifies the way the bridge's strict mode does
 // (required naming every property) and additionalProperties:false survives on
 // the responseJsonSchema path — the reference's print, this audit.
