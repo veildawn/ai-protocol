@@ -1206,3 +1206,181 @@ func TestMessagesResponseRefusalStopReason(t *testing.T) {
 		t.Fatalf("incomplete_details = %#v, want absent — the reference leaves it null on this chain", details)
 	}
 }
+
+// The gemini wire carries no model member (the name rides the URL there), so
+// a fold onto it reports no model and a fold off it reports whatever the
+// target body itself states — none, for a body this wire produced.
+func TestGeminiFoldsCarryNoModel(t *testing.T) {
+	chat := []byte(`{"model":"some-model","messages":[{"role":"user","content":"hi"}],"max_tokens":16}`)
+	out, err := ConvertRequest(Chat, Gemini, chat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Model != "" {
+		t.Fatalf("chat→gemini model = %q, want empty — the target body has no model member", out.Model)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(out.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if _, has := body["model"]; has {
+		t.Fatalf("gemini body carries a model member: %s", out.Body)
+	}
+
+	back, err := ConvertRequest(Gemini, Chat, out.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back.Model != "" {
+		t.Fatalf("gemini→chat model = %q, want empty — the source stated none", back.Model)
+	}
+}
+
+// Same-dialect gemini is the raw passthrough every other pair enjoys.
+func TestGeminiPassthroughKeepsBytes(t *testing.T) {
+	body := []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+	got, err := ConvertRequest(Gemini, Gemini, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got.Body, body) || got.Model != "" {
+		t.Fatalf("passthrough changed the body or invented a model: %s", got.Body)
+	}
+}
+
+// The dialect's own name normalizes; the deployment spellings of the same wire
+// are not public dialect names and must not.
+func TestNormalizeGeminiHasNoAliases(t *testing.T) {
+	if d, ok := Normalize("gemini"); !ok || d != Gemini {
+		t.Fatalf("gemini -> %s, %v", d, ok)
+	}
+	for _, not := range []string{"vertex", "vertex_ai", "google"} {
+		if _, ok := Normalize(not); ok {
+			t.Fatalf("%q normalized — the deployment spellings are not dialect names", not)
+		}
+	}
+}
+
+// A fold into Messages still needs that dialect's required ceiling. The gemini
+// wire derives it from the generation config when one is stated (its own
+// max_output_tokens, or a thinking budget plus the default ceiling); with
+// neither, the host supplies the value or the conversion names the gap.
+func TestGeminiToMessagesMaxTokensPaths(t *testing.T) {
+	stated := []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"max_output_tokens":50}}`)
+	got, err := ConvertRequest(Gemini, Messages, stated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(got.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["max_tokens"] != float64(50) {
+		t.Fatalf("stated ceiling = %v, want 50", body["max_tokens"])
+	}
+
+	budget := []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":2048,"includeThoughts":true}}}`)
+	got, err = ConvertRequest(Gemini, Messages, budget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = map[string]any{}
+	if err := json.Unmarshal(got.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["max_tokens"] != float64(2048+4096) {
+		t.Fatalf("derived ceiling = %v, want budget 2048 + default 4096", body["max_tokens"])
+	}
+
+	bare := []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+	var missing MissingRequiredFieldError
+	if _, err := ConvertRequest(Gemini, Messages, bare); !errors.As(err, &missing) || missing.Field != "max_tokens" {
+		t.Fatalf("bare body err = %v, want MissingRequiredFieldError{max_tokens}", err)
+	}
+	got, err = ConvertRequestWith(Gemini, Messages, bare, ConvertOptions{MaxTokensFallback: 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(got.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["max_tokens"] != float64(1024) {
+		t.Fatalf("fallback ceiling = %v, want 1024", body["max_tokens"])
+	}
+}
+
+// One URI shaped like the gemini wire's uploaded-files namespace reads the
+// same way from every dialect: the file rides as a file reference, unfetched,
+// whatever host it names. The check is on the path's shape — the codec carries
+// no host knowledge — and the three folds of that wire agree on it.
+func TestFilesNamespaceURIIsUniformAcrossFolds(t *testing.T) {
+	const uri = "https://my-proxy.example/v1beta/files/abc123?alt=media"
+
+	chat := jsonMap{
+		"messages": []any{map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "image_url", "image_url": map[string]any{"url": uri}},
+		}}},
+	}
+	out := convertReq(t, Chat, Gemini, chat)
+	parts := out["contents"].([]any)[0].(map[string]any)["parts"].([]any)
+	if fd, _ := parts[0].(map[string]any)["file_data"].(map[string]any); fd == nil || fd["file_uri"] != uri {
+		t.Fatalf("chat→gemini did not pass the files URI through: %#v", parts)
+	}
+
+	messages := jsonMap{
+		"max_tokens": 8,
+		"messages": []any{map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "image", "source": map[string]any{"type": "url", "url": uri}},
+		}}},
+	}
+	out = convertReq(t, Messages, Gemini, messages)
+	parts = out["contents"].([]any)[0].(map[string]any)["parts"].([]any)
+	if fd, _ := parts[0].(map[string]any)["file_data"].(map[string]any); fd == nil || fd["file_uri"] != uri {
+		t.Fatalf("messages→gemini did not pass the files URI through: %#v", parts)
+	}
+
+	responses := jsonMap{
+		"input": []any{map[string]any{"type": "message", "role": "user", "content": []any{
+			map[string]any{"type": "input_file", "file_url": uri},
+		}}},
+	}
+	out = convertReq(t, Responses, Gemini, responses)
+	parts = out["contents"].([]any)[0].(map[string]any)["parts"].([]any)
+	if fd, _ := parts[0].(map[string]any)["file_data"].(map[string]any); fd == nil || fd["file_uri"] != uri {
+		t.Fatalf("responses→gemini did not pass the files URI through: %#v", parts)
+	}
+
+	// A URL with no files path and no type-naming extension still refuses on
+	// every fold: pass-through is the shape's privilege, not every https
+	// URL's. The reference would fetch such a URL; this codec has no network,
+	// so the request fails instead of quietly losing the caller's media.
+	const badURI = "https://my-proxy.example/noext"
+	for _, tc := range []struct {
+		name string
+		from Dialect
+		in   jsonMap
+	}{
+		{"chat", Chat, jsonMap{
+			"messages": []any{map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "image_url", "image_url": map[string]any{"url": badURI}},
+			}}},
+		}},
+		{"messages", Messages, jsonMap{
+			"max_tokens": 8,
+			"messages": []any{map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "image", "source": map[string]any{"type": "url", "url": badURI}},
+			}}},
+		}},
+		{"responses", Responses, jsonMap{
+			"input": []any{map[string]any{"type": "message", "role": "user", "content": []any{
+				map[string]any{"type": "input_file", "file_url": badURI},
+			}}},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := ConvertRequest(tc.from, Gemini, mustJSON(tc.in)); err == nil {
+				t.Fatalf("an unresolvable media url was accepted on the %s fold", tc.name)
+			}
+		})
+	}
+}

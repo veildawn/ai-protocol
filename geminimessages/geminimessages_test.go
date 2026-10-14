@@ -1,0 +1,434 @@
+package geminimessages
+
+// Minimal checks against the golden bodies the spec quotes from real runs of
+// the reference's composed fold (spec §2.2, §2.5). They are not the parity
+// suite — the integration stage owns that — only a guard that the direct fold
+// produces the documented shapes.
+
+import (
+	"bufio"
+	"bytes"
+	"encoding/json"
+	"reflect"
+	"strings"
+	"testing"
+
+	"github.com/veildawn/ai-protocol/internal/jsonx"
+	"github.com/veildawn/ai-protocol/stream"
+)
+
+func decode(t *testing.T, s string) map[string]any {
+	t.Helper()
+	// Decode twice so number literals (1) and floats (1.0) compare the same
+	// whichever side wrote them.
+	var m map[string]any
+	if err := json.Unmarshal([]byte(s), &m); err != nil {
+		t.Fatalf("decode %s: %v", s, err)
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+func normalize(v any) any {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return v
+	}
+	var out any
+	if err := json.Unmarshal(b, &out); err != nil {
+		return v
+	}
+	return out
+}
+
+func assertEqual(t *testing.T, got, want any, what string) {
+	t.Helper()
+	g, w := normalize(got), normalize(want)
+	if !reflect.DeepEqual(g, w) {
+		gb, _ := json.Marshal(g)
+		wb, _ := json.Marshal(w)
+		t.Fatalf("%s mismatch:\n got  %s\n want %s", what, gb, wb)
+	}
+}
+
+// sseEvents decodes an SSE stream into its (event name, data) pairs.
+func sseEvents(t *testing.T, s string) []stream.Event {
+	t.Helper()
+	var evs []stream.Event
+	sc := bufio.NewScanner(strings.NewReader(s))
+	var name string
+	var data []string
+	flush := func() {
+		if len(data) == 0 {
+			return
+		}
+		evs = append(evs, stream.Event{Event: name, Data: strings.Join(data, "\n")})
+		name, data = "", nil
+	}
+	for sc.Scan() {
+		line := sc.Text()
+		switch {
+		case line == "":
+			flush()
+		case strings.HasPrefix(line, "event: "):
+			name = strings.TrimPrefix(line, "event: ")
+		case strings.HasPrefix(line, "data: "):
+			data = append(data, strings.TrimPrefix(line, "data: "))
+		}
+	}
+	flush()
+	return evs
+}
+
+func TestMessagesToGeminiSpecSample(t *testing.T) {
+	// The spec's §2.2 sample: a tool round trip, a system prompt, tools, an
+	// auto tool choice, thinking and stop sequences.
+	src := decode(t, `{
+	  "model":"gemini-2.5-pro","max_tokens":32,"system":"be brief",
+	  "messages":[{"role":"user","content":"hello"},
+	    {"role":"assistant","content":[{"type":"text","text":"hi"},
+	      {"type":"tool_use","id":"tu_1","name":"lookup","input":{"q":"x"}}]},
+	    {"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":"res"}]}],
+	  "tools":[{"name":"lookup","description":"d",
+	    "input_schema":{"type":"object","properties":{"q":{"type":"string"}}}}],
+	  "tool_choice":{"type":"auto"},"thinking":{"type":"enabled","budget_tokens":2048},
+	  "stop_sequences":["END"]}`)
+	got, err := MessagesToGemini(src, false)
+	if err != nil {
+		t.Fatalf("MessagesToGemini: %v", err)
+	}
+	want := decode(t, `{
+	  "contents":[
+	    {"role":"user","parts":[{"text":"hello"}]},
+	    {"role":"model","parts":[{"text":"hi"},{"function_call":{"name":"lookup","args":{"q":"x"}}}]},
+	    {"role":"user","parts":[{"function_response":{"name":"lookup","response":{"content":"res"}}}]}],
+	  "system_instruction":{"parts":[{"text":"be brief"}]},
+	  "tools":[{"function_declarations":[{"name":"lookup","description":"d",
+	     "parameters":{"type":"object","properties":{"q":{"type":"string"}}}}]}],
+	  "toolConfig":{"functionCallingConfig":{"mode":"AUTO"}},
+	  "generationConfig":{"thinkingConfig":{"thinkingBudget":2048,"includeThoughts":true},
+	    "stop_sequences":["END"],"max_output_tokens":32}}`)
+	assertEqual(t, got, want, "fold")
+}
+
+func TestMessagesToGeminiRejectsContextManagement(t *testing.T) {
+	src := decode(t, `{"model":"m","max_tokens":8,"context_management":{"edits":[]},
+		"messages":[{"role":"user","content":"hi"}]}`)
+	if _, err := MessagesToGemini(src, false); err == nil {
+		t.Fatal("context_management was not rejected with dropParams=false")
+	}
+	if _, err := MessagesToGemini(src, true); err != nil {
+		t.Fatalf("context_management with dropParams=true: %v", err)
+	}
+}
+
+func TestMessagesToGeminiThinkingLadder(t *testing.T) {
+	// The two-level fold the spec pins: budget 5000 lands on 4096 and a
+	// disabled request turns the thoughts off entirely.
+	for _, tc := range []struct {
+		thinking string
+		want     string
+	}{
+		{`{"type":"enabled","budget_tokens":5000}`, `{"thinkingBudget":4096,"includeThoughts":true}`},
+		{`{"type":"enabled","budget_tokens":128}`, `{"thinkingBudget":128,"includeThoughts":true}`},
+		{`{"type":"enabled","budget_tokens":0}`, `{"thinkingBudget":128,"includeThoughts":true}`},
+		{`{"type":"adaptive"}`, `{"thinkingBudget":2048,"includeThoughts":true}`},
+		{`{"type":"adaptive"},"output_config":{"effort":"high"}`, `{"thinkingBudget":4096,"includeThoughts":true}`},
+		{`{"type":"disabled"}`, `{"thinkingBudget":0,"includeThoughts":false}`},
+		{`{"type":"weird"}`, ``},
+	} {
+		src := decode(t, `{"model":"m","max_tokens":8,"messages":[{"role":"user","content":"x"}],"thinking":`+tc.thinking+`}`)
+		got, err := MessagesToGemini(src, false)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.thinking, err)
+		}
+		gc, _ := got["generationConfig"].(map[string]any)
+		var cfg map[string]any
+		if gc != nil {
+			cfg, _ = gc["thinkingConfig"].(map[string]any)
+		}
+		if tc.want == "" {
+			if cfg != nil {
+				t.Fatalf("%s: thinkingConfig = %v, want none", tc.thinking, cfg)
+			}
+			continue
+		}
+		assertEqual(t, cfg, decode(t, tc.want), tc.thinking)
+	}
+}
+
+func TestMessagesToGeminiEmptyAndMediaTurns(t *testing.T) {
+	// An image-only user turn gains the blank text the target requires, and a
+	// user turn with no foldable content leaves the contents fallback.
+	img := decode(t, `{"model":"m","max_tokens":8,"messages":[{"role":"user","content":[
+	  {"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAB"}}]}]}`)
+	got, err := MessagesToGemini(img, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEqual(t, got, decode(t, `{"contents":[{"role":"user","parts":[
+	   {"inline_data":{"data":"AAAB","mime_type":"image/png"}},{"text":" "}]}],
+	   "generationConfig":{"max_output_tokens":8}}`), "image turn")
+
+	empty := decode(t, `{"model":"m","max_tokens":8,"messages":[{"role":"user","content":""}]}`)
+	got, err = MessagesToGemini(empty, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEqual(t, got, decode(t, `{"contents":[{"role":"user","parts":[{"text":" "}]}],
+	   "generationConfig":{"max_output_tokens":8}}`), "empty turn")
+
+	sysOnly := decode(t, `{"model":"m","max_tokens":8,"system":"sys","messages":[]}`)
+	got, err = MessagesToGemini(sysOnly, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEqual(t, got, decode(t, `{"contents":[{"role":"user","parts":[{"text":"."}]}],
+	   "system_instruction":{"parts":[{"text":"sys"}]},
+	   "generationConfig":{"max_output_tokens":8}}`), "system only")
+}
+
+func TestGeminiResponseToMessagesRich(t *testing.T) {
+	// The spec's §2.5 sample shape: thinking with a signature first, then the
+	// text, then the tool call whose signature moves off the id.
+	src := decode(t, `{"candidates":[{"content":{"role":"model","parts":[
+	    {"text":"think","thought":true,"thoughtSignature":"SIG1"},
+	    {"text":"hello"},
+	    {"functionCall":{"name":"f","args":{"a":1}},"thoughtSignature":"SIG2"}]},
+	  "finishReason":"STOP","index":0}],
+	 "usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":4,"totalTokenCount":16,
+	   "cachedContentTokenCount":2,"thoughtsTokenCount":2},
+	 "responseId":"resp-9"}`)
+	got := GeminiResponseToMessages(src)
+	want := decode(t, `{"id":"resp-9","type":"message","role":"assistant","model":"unknown-model",
+	  "stop_sequence":null,
+	  "usage":{"input_tokens":8,"output_tokens":6,"cache_read_input_tokens":2},
+	  "content":[{"type":"thinking","thinking":"think","signature":"SIG1"},
+	             {"type":"text","text":"hello"},
+	             {"type":"tool_use","id":"call_0","name":"f","input":{"a":1},
+	              "provider_specific_fields":{"signature":"SIG2"}}],
+	  "stop_reason":"tool_use"}`)
+	assertEqual(t, got, want, "fold")
+}
+
+func TestGeminiResponseToMessagesBlocked(t *testing.T) {
+	src := decode(t, `{"promptFeedback":{"blockReason":"SAFETY"},
+	  "usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":0,"totalTokenCount":5}}`)
+	got := GeminiResponseToMessages(src)
+	if got["stop_reason"] != "end_turn" {
+		t.Fatalf("stop_reason = %v, want end_turn", got["stop_reason"])
+	}
+	assertEqual(t, got["usage"], decode(t, `{"input_tokens":5,"output_tokens":0}`), "usage")
+	if content, ok := got["content"].([]any); !ok || len(content) != 0 {
+		t.Fatalf("content = %#v, want empty", got["content"])
+	}
+}
+
+func TestGeminiResponseToMessagesMediaDestinations(t *testing.T) {
+	// Images drop, non-image non-audio inline data rides the text as a data
+	// URL, and audio drops — the three homes media have on this fold.
+	src := decode(t, `{"candidates":[{"content":{"role":"model","parts":[
+	    {"text":"see"},{"inlineData":{"mimeType":"image/png","data":"AAAB"}},
+	    {"inlineData":{"mimeType":"application/pdf","data":"JVBE"}},
+	    {"inlineData":{"mimeType":"audio/wav","data":"AAAA"}}]},"finishReason":"STOP","index":0}],
+	 "usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}`)
+	got := GeminiResponseToMessages(src)
+	content, ok := got["content"].([]any)
+	if !ok || len(content) != 1 {
+		t.Fatalf("content = %#v, want one text block", got["content"])
+	}
+	assertEqual(t, content[0], decode(t, `{"type":"text","text":"seedata:application/pdf;base64,JVBE"}`), "text block")
+}
+
+func TestMessagesResponseToGeminiRoundTrip(t *testing.T) {
+	// A messages response folds to the target and back to the same usage the
+	// composed fold would report.
+	src := decode(t, `{"id":"m1","type":"message","role":"assistant","model":"any",
+	  "content":[{"type":"thinking","thinking":"t","signature":"S"},
+	             {"type":"text","text":"hello"},
+	             {"type":"tool_use","id":"tu_1","name":"f","input":{"a":1}}],
+	  "stop_reason":"tool_use",
+	  "usage":{"input_tokens":8,"output_tokens":6,"cache_read_input_tokens":2}}`)
+	gemini := MessagesResponseToGemini(src)
+	assertEqual(t, gemini["responseId"], "m1", "responseId")
+	gc, _ := gemini["candidates"].([]any)
+	cand, _ := gc[0].(map[string]any)
+	assertEqual(t, cand["finishReason"], "STOP", "finishReason")
+	assertEqual(t, gemini["usageMetadata"], decode(t, `{
+	  "promptTokenCount":10,"candidatesTokenCount":6,"totalTokenCount":16,
+	  "cachedContentTokenCount":2,
+	  "promptTokensDetails":[{"modality":"TEXT","tokenCount":8}],
+	  "candidatesTokensDetails":[{"modality":"TEXT","tokenCount":6}]}`), "usageMetadata")
+	back := GeminiResponseToMessages(gemini)
+	assertEqual(t, back["usage"], decode(t, `{"input_tokens":8,"output_tokens":6,"cache_read_input_tokens":2}`), "usage round trip")
+	assertEqual(t, back["stop_reason"], "tool_use", "stop_reason round trip")
+}
+
+func TestPipeGeminiToMessagesSequence(t *testing.T) {
+	// The spec's §2.8 sequence: thinking, text and tool blocks with dense
+	// indexes, then exactly one message_delta with the real usage.
+	src := strings.Join([]string{
+		`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"think","thought":true}]},"index":0}],"responseId":"r1"}`,
+		`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]},"index":0}],"responseId":"r1"}`,
+		`data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"f","args":{"a":1}}}]},"index":0}],"responseId":"r1"}`,
+		`data: {"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":3,"totalTokenCount":8},"responseId":"r1"}`,
+	}, "\n\n") + "\n\n"
+	var dst bytes.Buffer
+	if _, err := PipeGeminiToMessages(&dst, strings.NewReader(src), StreamOpts{Model: "gemini-2.5-pro"}); err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	evs := sseEvents(t, dst.String())
+	var types []string
+	for _, ev := range evs {
+		m := decode(t, ev.Data)
+		types = append(types, jsonx.GetString(m, "type"))
+	}
+	assertEqual(t, types, []any{
+		"message_start", "content_block_start", "content_block_delta", "content_block_stop",
+		"content_block_start", "content_block_delta", "content_block_stop",
+		"content_block_start", "content_block_delta", "content_block_stop",
+		"message_delta", "message_stop",
+	}, "event types")
+
+	assertEqual(t, decode(t, evs[1].Data), decode(t, `{"type":"content_block_start","index":0,
+		"content_block":{"type":"thinking","thinking":"","signature":""}}`), "thinking start")
+	assertEqual(t, decode(t, evs[2].Data), decode(t, `{"type":"content_block_delta","index":0,
+		"delta":{"type":"thinking_delta","thinking":"think"}}`), "thinking delta")
+	assertEqual(t, decode(t, evs[4].Data), decode(t, `{"type":"content_block_start","index":1,
+		"content_block":{"type":"text","text":""}}`), "text start")
+	assertEqual(t, decode(t, evs[5].Data), decode(t, `{"type":"content_block_delta","index":1,
+		"delta":{"type":"text_delta","text":"hi"}}`), "text delta")
+	assertEqual(t, decode(t, evs[7].Data), decode(t, `{"type":"content_block_start","index":2,
+		"content_block":{"type":"tool_use","id":"call_0","name":"f","input":{}}}`), "tool start")
+	assertEqual(t, decode(t, evs[8].Data), decode(t, `{"type":"content_block_delta","index":2,
+		"delta":{"type":"input_json_delta","partial_json":"{\"a\": 1}"}}`), "tool delta")
+	assertEqual(t, decode(t, evs[10].Data), decode(t, `{"type":"message_delta",
+		"delta":{"stop_reason":"tool_use"},"usage":{"input_tokens":5,"output_tokens":3}}`), "message_delta")
+	assertEqual(t, decode(t, evs[0].Data), decode(t, `{"type":"message_start","message":{
+		"id":"r1","type":"message","role":"assistant","model":"gemini-2.5-pro","content":[],
+		"stop_reason":null,"stop_sequence":null,
+		"usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}`), "message_start")
+}
+
+func TestPipeGeminiToMessagesTruncationIsNotACompletion(t *testing.T) {
+	src := "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"hi\"}]},\"index\":0}]}\n\n"
+	var dst bytes.Buffer
+	if _, err := PipeGeminiToMessages(&dst, strings.NewReader(src), StreamOpts{}); err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	out := dst.String()
+	if strings.Contains(out, "message_delta") || strings.Contains(out, "message_stop") {
+		t.Fatalf("truncated source was closed for the client:\n%s", out)
+	}
+	if !strings.Contains(out, `"text":"hi"`) {
+		t.Fatalf("delivered content lost:\n%s", out)
+	}
+}
+
+func TestPipeMessagesToGeminiEmitsTerminalOnlyOnSourceClose(t *testing.T) {
+	src := strings.Join([]string{
+		"event: message_start",
+		`data: {"type":"message_start","message":{"id":"msg_1","model":"m","usage":{"input_tokens":3}}}`,
+		"event: content_block_delta",
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}`,
+		"event: message_delta",
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":4}}`,
+	}, "\n\n") + "\n\n"
+	var dst bytes.Buffer
+	if _, err := PipeMessagesToGemini(&dst, strings.NewReader(src), StreamOpts{}); err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	out := dst.String()
+	if strings.Contains(out, "finishReason") {
+		t.Fatalf("terminal written before the source closed:\n%s", out)
+	}
+	if !strings.Contains(out, `"text":"hi"`) {
+		t.Fatalf("text frame lost:\n%s", out)
+	}
+	// Closing with message_stop writes the terminal frame with the usage the
+	// stream accumulated.
+	src += "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+	dst.Reset()
+	if _, err := PipeMessagesToGemini(&dst, strings.NewReader(src), StreamOpts{}); err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	frames := sseEvents(t, dst.String())
+	last := decode(t, frames[len(frames)-1].Data)
+	assertEqual(t, last, decode(t, `{"candidates":[{"content":{"role":"model","parts":[]},
+		"finishReason":"STOP","index":0}],
+		"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":4,"totalTokenCount":7,
+		 "promptTokensDetails":[{"modality":"TEXT","tokenCount":3}],
+		 "candidatesTokensDetails":[{"modality":"TEXT","tokenCount":4}]}}`), "terminal frame")
+}
+
+func TestPipeMessagesToGeminiToolArgumentsWhole(t *testing.T) {
+	// Argument fragments that never become a JSON object emit no call; a
+	// complete object emits exactly one, on the last parseable snapshot.
+	src := strings.Join([]string{
+		"event: message_start",
+		`data: {"type":"message_start","message":{"id":"m","usage":{"input_tokens":1}}}`,
+		"event: content_block_start",
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t1","name":"f","input":{}}}`,
+		"event: content_block_delta",
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"a\":"}}`,
+		"event: content_block_delta",
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"1}"}}`,
+		"event: message_delta",
+		`data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":1}}`,
+		"event: message_stop",
+		`data: {"type":"message_stop"}`,
+	}, "\n\n") + "\n\n"
+	var dst bytes.Buffer
+	if _, err := PipeMessagesToGemini(&dst, strings.NewReader(src), StreamOpts{}); err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	frames := sseEvents(t, dst.String())
+	var callFrame map[string]any
+	calls := 0
+	for _, ev := range frames {
+		m := decode(t, ev.Data)
+		cands, _ := m["candidates"].([]any)
+		for _, craw := range cands {
+			c, _ := craw.(map[string]any)
+			content, _ := c["content"].(map[string]any)
+			parts, _ := content["parts"].([]any)
+			for _, praw := range parts {
+				p, _ := praw.(map[string]any)
+				if _, ok := p["function_call"]; ok {
+					calls++
+					callFrame = p
+				}
+			}
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("call emitted %d times, want 1", calls)
+	}
+	assertEqual(t, callFrame, decode(t, `{"function_call":{"args":{"a":1},"name":"f"}}`), "call frame")
+}
+
+// A user-turn media URL this offline codec cannot resolve is an error, not a
+// silent drop: the reference would fetch it (and fail offline reaching for
+// it), and a prompt that quietly lost the caller's image answers the wrong
+// question with no signal anywhere. Spec §2.1 rule 23; the chat-side and
+// responses-side folds of the same wire refuse the same input.
+func TestMessagesToGeminiUnresolvableMediaURLIsAnError(t *testing.T) {
+	body := decode(t, `{"model":"m","max_tokens":8,"messages":[{"role":"user","content":[
+	  {"type":"text","text":"see"},
+	  {"type":"image","source":{"type":"url","url":"https://my-proxy.example/noext"}}]}]}`)
+	if _, err := MessagesToGemini(body, false); err == nil {
+		t.Fatal("an unresolvable media url was silently dropped")
+	}
+	// The same document spelling refuses the same way.
+	doc := decode(t, `{"model":"m","max_tokens":8,"messages":[{"role":"user","content":[
+	  {"type":"document","source":{"type":"url","url":"https://my-proxy.example/noext"}}]}]}`)
+	if _, err := MessagesToGemini(doc, false); err == nil {
+		t.Fatal("an unresolvable document url was silently dropped")
+	}
+}

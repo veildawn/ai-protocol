@@ -8,4 +8,5 @@ const (
 	Chat      Dialect = "chat"
 	Messages  Dialect = "messages"
 	Responses Dialect = "responses"
+	Gemini    Dialect = "gemini"
 )

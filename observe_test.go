@@ -41,6 +41,12 @@ func TestStreamResultSurvivesSplitEvents(t *testing.T) {
 		`data: {"id":"c1","model":"m","choices":[{"index":0,"delta":{"content":"hi"}}]}`, "",
 		`data: [DONE]`, "",
 	}, "\n")
+	// The gemini wire's terminal is its finishReason frame — the one event
+	// that states the close — so it is the frame that must survive a split.
+	gemini := strings.Join([]string{
+		`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]},"index":0}],"responseId":"r1"}`, "",
+		`data: {"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2},"responseId":"r1"}`, "",
+	}, "\n")
 
 	for _, tc := range []struct {
 		name     string
@@ -49,6 +55,7 @@ func TestStreamResultSurvivesSplitEvents(t *testing.T) {
 	}{
 		{"responses terminal", Responses, Chat, responses},
 		{"chat sentinel", Chat, Responses, chat},
+		{"gemini finishReason", Gemini, Chat, gemini},
 	} {
 		for _, size := range []int{3, 7, 64, 4096} {
 			var dst bytes.Buffer

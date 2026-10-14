@@ -37,6 +37,23 @@ func (e Event) Dialect() Dialect {
 		"response.output_text.delta", "response.output_item.added":
 		return Responses
 	}
+	// A frame with no type name is either a Chat chunk or a frame of the
+	// generateContent wire. The three keys checked here are that wire's whole
+	// framing vocabulary; the Chat keys (choices, usage) are excluded first so
+	// the two dialects never reach for the same frame — their key names do not
+	// overlap, so the exclusion only needs to be stable, not prioritized.
+	var keys struct {
+		Candidates     json.RawMessage `json:"candidates"`
+		PromptFeedback json.RawMessage `json:"promptFeedback"`
+		UsageMetadata  json.RawMessage `json:"usageMetadata"`
+		Choices        json.RawMessage `json:"choices"`
+		Usage          json.RawMessage `json:"usage"`
+	}
+	if json.Unmarshal([]byte(e.Data), &keys) == nil && obj.Type == "" &&
+		len(keys.Choices) == 0 && len(keys.Usage) == 0 &&
+		(len(keys.Candidates) > 0 || len(keys.PromptFeedback) > 0 || len(keys.UsageMetadata) > 0) {
+		return Gemini
+	}
 	return ""
 }
 

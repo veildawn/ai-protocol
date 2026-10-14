@@ -13,7 +13,7 @@ import (
 )
 
 // This file is the codec's border, written as a test rather than as a
-// convention. ai-protocol is a PUBLIC DIALECT CODEC and nothing else: three
+// convention. ai-protocol is a PUBLIC DIALECT CODEC and nothing else: four
 // public dialects, request/response/SSE conversion, explicit error semantics.
 // It does not speak HTTP, does not know a vendor, and carries no routing,
 // billing, account or quota policy. Those rules are only worth anything if a
@@ -174,7 +174,7 @@ func TestImportRulesCatchWhatTheyClaim(t *testing.T) {
 	}
 }
 
-// Exactly three public dialects. A fourth would be a new wire format the codec
+// Exactly four public dialects. A fifth would be a new wire format the codec
 // claims to understand — a boundary decision, not a rename.
 func TestDialectVocabularyIsClosed(t *testing.T) {
 	files, _ := parseModule(t, false)
@@ -207,7 +207,7 @@ func TestDialectVocabularyIsClosed(t *testing.T) {
 			}
 		}
 	}
-	want := map[string]string{"Chat": "chat", "Messages": "messages", "Responses": "responses"}
+	want := map[string]string{"Chat": "chat", "Messages": "messages", "Responses": "responses", "Gemini": "gemini"}
 	if len(got) != len(want) {
 		t.Fatalf("dialect constants are %v, want exactly %v", got, want)
 	}
@@ -222,9 +222,16 @@ func TestDialectVocabularyIsClosed(t *testing.T) {
 // the codec: brand names, vendor hosts, vendor-only parameter spellings. The
 // scan covers non-test sources only, so a fixture may still carry a model id
 // like "claude-3" without tripping it.
+//
+// "gemini" is deliberately absent: it is the NAME of the fourth public dialect
+// (its generateContent wire), so the word names a wire format this codec
+// converts, not a vendor privilege. That narrowing is itself a boundary
+// decision — the dialect constant, the README contract and this list changed
+// together. The deployment and studio spellings of that wire remain unnamed
+// here, and their words stay in the list.
 var vendorVocabulary = []string{
 	"openai.com", "anthropic.com", "googleapis.com",
-	"gemini", "claude", "gpt", "qwen", "deepseek", "grok", "mistral",
+	"claude", "gpt", "qwen", "deepseek", "grok", "mistral",
 	"cohere", "ollama", "llama", "bedrock", "vertex", "azure",
 	"moonshot", "zhipu", "kimi", "litellm",
 }
@@ -268,18 +275,30 @@ func TestVendorRulesCatchWhatTheyClaim(t *testing.T) {
 var boundarySurfaceAllowlist = map[string][]string{
 	"chatmessages":  {"ChatResponseToMessages", "ChatToMessages", "MessagesResponseToChat", "MessagesToChat", "PipeChatToMessages", "PipeMessagesToChat", "StreamOpts"},
 	"chatresponses": {"ChatResponseToResponses", "ChatToResponses", "PipeChatToResponses", "PipeResponsesToChat", "ResponsesResponseToChat", "ResponsesToChat", "StreamOpts"},
+	"geminichat": {
+		"ChatResponseToGemini", "ChatToGemini", "GeminiResponseToChat", "GeminiToChat",
+		"PipeChatToGemini", "PipeGeminiToChat", "StreamOpts",
+	},
+	"geminimessages": {
+		"GeminiResponseToMessages", "GeminiToMessages", "MessagesResponseToGemini", "MessagesToGemini",
+		"PipeGeminiToMessages", "PipeMessagesToGemini", "StreamOpts",
+	},
+	"geminiresponses": {
+		"GeminiResponseToResponses", "GeminiToResponses", "PipeGeminiToResponses", "PipeResponsesToGemini",
+		"ResponsesResponseToGemini", "ResponsesToGemini", "StreamOpts",
+	},
 	"internal/cerr": {"UnsupportedParam", "UnsupportedParam.Error"},
 	"internal/dialectvocab": {
 		"AnthropicHostedTools", "DefaultMaxTokens", "IsAnthropicHostedTool",
 		"IsResponsesOnlyTool", "ResponsesOnlyTools", "ThinkingBudget",
 	},
-	"internal/jsonx":    {"AsMap", "AsSlice", "Bool", "CloneMap", "GetString", "Int", "JoinText", "Marshal", "String", "UnmarshalMap"},
+	"internal/jsonx":    {"ArgsValue", "AsMap", "AsSlice", "Bool", "CloneMap", "GetString", "Int", "JoinText", "Marshal", "String", "UnmarshalMap"},
 	"messagesresponses": {"MessagesResponseToResponses", "MessagesToResponses", "PipeMessagesToResponses", "PipeResponsesToMessages", "ResponsesRequestToMessages", "ResponsesToMessages", "StreamOpts"},
 	"protocol": {
 		"BodyLosses", "Chat", "ConversionError", "ConversionError.Error", "ConversionError.Unwrap",
 		"ConvertOptions", "ConvertRequest", "ConvertRequestWith", "ConvertResponse", "ConvertResponseWith",
-		"Converted", "Dialect", "Dialect.String", "Loss", "LossFileReference", "LossLogitBias", "LossLogprobs",
-		"LossMultiChoice", "LossPenaltyControls", "LossSeed", "LossSet", "LossSet.Add", "LossSet.Union",
+		"Converted", "Dialect", "Dialect.String", "Gemini", "Loss", "LossFileReference", "LossLogitBias", "LossLogprobs",
+		"LossMultiChoice", "LossNativeParam", "LossPenaltyControls", "LossSeed", "LossSet", "LossSet.Add", "LossSet.Union",
 		"LossStructuredOutput", "LossToolArguments", "LossUnknownContent", "Messages",
 		"MissingRequiredFieldError", "MissingRequiredFieldError.Error", "Normalize",
 		"PeekModel", "PipeStream", "PipeStreamWith", "Responses", "StaticLosses", "StreamOpts", "StreamResult",
@@ -288,7 +307,7 @@ var boundarySurfaceAllowlist = map[string][]string{
 	"stream": {
 		"Chat", "ClassifyEvent", "Dialect", "Event", "Event.Dialect", "Event.Encode", "EventComplete",
 		"EventContent", "EventFacts", "EventFailure", "EventIncomplete", "EventKind", "EventPrelude",
-		"EventReasoning", "EventUnknown", "Fail", "Framer", "Framer.Feed", "Framer.Finish",
+		"EventReasoning", "EventUnknown", "Fail", "Framer", "Framer.Feed", "Framer.Finish", "Gemini",
 		"InBandError", "IsDone", "Messages", "Observer",
 		"Observer.Feed", "Responses", "Result", "Scan", "WriteDone", "WriteEvent", "WriteEventWith",
 	},

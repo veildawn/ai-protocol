@@ -1,11 +1,13 @@
 # ai-protocol
 
 A **public dialect codec**: it converts JSON bodies and SSE streams between the
-three public LLM dialects, and it does nothing else.
+four public LLM dialects, and it does nothing else.
 
 - `chat` — OpenAI Chat Completions (`/v1/chat/completions`)
 - `messages` — Anthropic Messages (`/v1/messages`)
 - `responses` — OpenAI Responses (`/v1/responses`)
+- `gemini` — the generateContent wire (`contents`/`parts`, `candidates`,
+  `finishReason`)
 
 Mappings follow [LiteLLM](https://github.com/BerriAI/litellm) **v1.100.1** (see
 [NOTICE](NOTICE)).
@@ -18,10 +20,16 @@ them.
 
 **What it is**
 
-- Exactly three public dialects, request/response/SSE conversion between any
+- Exactly four public dialects, request/response/SSE conversion between any
   pair of them, as pure functions.
 - `PeekModel` reads the top-level `model` member without a full decode, for the
-  hosts that route on it before any conversion runs.
+  hosts that route on it before any conversion runs. A gemini body has no
+  `model` member (the name rides the URL there), so the peek answers `("", nil)`
+  for it — an absent member is not an error.
+- `Normalize` accepts the dialect names plus the gateway spellings `openai` and
+  `anthropic`. `gemini` has no alias: the deployment and studio spellings of
+  that wire are not public dialect names, so the dialect's own name is the only
+  one that normalizes.
 - Explicit error semantics: `UnsupportedParamError` for a parameter the target
   dialect cannot carry, `MissingRequiredFieldError` for a field the target
   dialect requires that the caller declined to supply (Messages folds and
@@ -32,8 +40,10 @@ them.
   `stream.ClassifyEvent` reports per-event public-protocol facts (prelude,
   content, reasoning, completion, incomplete, failure or unknown). A Chat
   `finish_reason` is a logical completion fact, not a wire-terminal frame;
-  Chat's `[DONE]` remains distinct. These facts do not decide retry, billing or
-  routing.
+  Chat's `[DONE]` remains distinct. The gemini wire has no sentinel at all —
+  its terminal fact is the frame whose candidate carries a `finishReason` (or
+  a blocked prompt), which is the source's own close. These facts do not decide
+  retry, billing or routing.
 - Offline and standard-library only. No module dependencies, no I/O, no clock.
 
 **What it is not**
@@ -48,7 +58,7 @@ them.
 **Where it sits**
 
 ```
-client public dialect        openai / anthropic / responses, as the client speaks it
+client public dialect        openai / anthropic / responses / gemini, as the client speaks it
         ↓
 ai-protocol                  public ↔ public conversion, pure functions
         ↓
@@ -87,8 +97,12 @@ that stops without it is a truncation, the fold leaves the turn open, and
 `StreamResult.Truncated` tells the host (which is where the failure the host
 records and the failure the client sees become the same failure). A Chat source
 is the exception, because several vendors close on a usage chunk instead of
-`[DONE]`: its folds still close the turn for the client. It is how a host applies
-a rewriting this library does not know about without re-parsing serialized SSE:
+`[DONE]`: its folds still close the turn for the client. A gemini source states
+its close on the frame whose candidate carries a `finishReason` (a blocked
+prompt states one too, as a filter); a relay's `[DONE]` closes the turn without
+inventing a reason, and a bare EOF is a truncation like any other. It is how a
+host applies a rewriting this library does not know about without re-parsing
+serialized SSE:
 
 ```go
 result, err := protocol.PipeStreamWith(protocol.Chat, protocol.Responses, dst, src, protocol.StreamOpts{

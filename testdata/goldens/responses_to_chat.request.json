@@ -1,0 +1,40 @@
+{
+  "max_tokens": 32,
+  "messages": [
+    {
+      "content": "be brief",
+      "role": "system"
+    },
+    {
+      "content": [
+        {
+          "text": "hello",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "gpt-4o",
+  "reasoning_effort": "medium",
+  "tool_choice": "auto",
+  "tools": [
+    {
+      "function": {
+        "description": "d",
+        "name": "lookup",
+        "parameters": {
+          "properties": {
+            "q": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "strict": false
+      },
+      "type": "function"
+    }
+  ],
+  "user": "u1"
+}

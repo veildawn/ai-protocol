@@ -1,0 +1,47 @@
+{
+  "choices": [
+    {
+      "finish_reason": "tool_calls",
+      "index": 0,
+      "message": {
+        "images": [],
+        "reasoning_content": "let me think",
+        "role": "assistant",
+        "thinking_blocks": [
+          {
+            "thinking": "let me think",
+            "type": "thinking"
+          }
+        ],
+        "tool_calls": [
+          {
+            "function": {
+              "arguments": "{\"q\": \"x\"}",
+              "name": "lookup"
+            },
+            "id": "call_<uuid>",
+            "index": 0,
+            "type": "function"
+          }
+        ]
+      }
+    }
+  ],
+  "created": 0,
+  "id": "resp-1",
+  "model": "gemini-2.5-pro",
+  "object": "chat.completion",
+  "usage": {
+    "completion_tokens": 3,
+    "completion_tokens_details": {
+      "text_tokens": 3
+    },
+    "prompt_tokens": 5,
+    "prompt_tokens_details": {},
+    "total_tokens": 8
+  },
+  "vertex_ai_citation_metadata": [],
+  "vertex_ai_grounding_metadata": [],
+  "vertex_ai_safety_results": [],
+  "vertex_ai_url_context_metadata": []
+}

@@ -190,3 +190,29 @@ func TestStreamHookNilAndIdentityAreIdentical(t *testing.T) {
 		t.Fatalf("identity hook changed the bytes:\n%q\n%q", without.String(), with.String())
 	}
 }
+
+// The gemini folds ride the same hook seam as the typed dialects: a fold that
+// synthesizes the target's terminal (the chat [DONE] after a finishReason
+// frame — a frame the source never sent in that shape) must expose it to the
+// hook like any other written event.
+func TestStreamHookSeesGeminiSynthesizedTerminal(t *testing.T) {
+	src := `data: {"candidates":[{"content":{"role":"model","parts":[{"text":"A"}]},"index":0}],"responseId":"r1"}` + "\n\n" +
+		`data: {"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2},"responseId":"r1"}` + "\n\n"
+	var seen []stream.Event
+	var dst bytes.Buffer
+	if _, err := PipeStream(Gemini, Chat, &dst, strings.NewReader(src), StreamOpts{
+		OnEvent: func(ev stream.Event) (stream.Event, error) {
+			seen = append(seen, ev)
+			return ev, nil
+		},
+	}); err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	written := scanEvents(t, dst.String())
+	if len(seen) != len(written) {
+		t.Fatalf("hook saw %d events, %d were written", len(seen), len(written))
+	}
+	if last := seen[len(seen)-1]; !stream.IsDone(last.Data) {
+		t.Fatalf("hook never saw the synthesized [DONE]; last = %+v", last)
+	}
+}

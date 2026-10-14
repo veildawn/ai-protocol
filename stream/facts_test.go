@@ -167,6 +167,106 @@ func TestClassifyStreamEventFacts(t *testing.T) {
 			event: Event{Event: "ping"},
 			want:  EventPrelude,
 		},
+		// The generateContent wire: no sentinel, no separate terminal frame —
+		// a candidate's finishReason (or a blocked promptFeedback) IS the
+		// source's own close, so those frames carry Terminal here.
+		{
+			name:    "gemini text frame is content",
+			dialect: Gemini,
+			event:   Event{Data: `{"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]},"index":0}]}`},
+			want:    EventContent,
+		},
+		{
+			name:    "gemini thought frame is reasoning",
+			dialect: Gemini,
+			event:   Event{Data: `{"candidates":[{"content":{"role":"model","parts":[{"text":"think","thought":true}]}}]}`},
+			want:    EventReasoning,
+		},
+		{
+			name:    "gemini function call frame is content",
+			dialect: Gemini,
+			event:   Event{Data: `{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"f","args":{"a":1}}}]}}]}`},
+			want:    EventContent,
+		},
+		{
+			name:    "gemini empty candidate is prelude",
+			dialect: Gemini,
+			event:   Event{Data: `{"candidates":[{"content":{"role":"model","parts":[]},"index":0}]}`},
+			want:    EventPrelude,
+		},
+		{
+			// A signature alone says nothing was delivered: the thought text
+			// it signs rides other frames.
+			name:    "gemini lone thought signature is prelude",
+			dialect: Gemini,
+			event:   Event{Data: `{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"sig"}]}}]}`},
+			want:    EventPrelude,
+		},
+		{
+			name:         "gemini finishReason STOP is a terminal completion",
+			dialect:      Gemini,
+			event:        Event{Data: `{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":1}}`},
+			want:         EventComplete,
+			wantTerminal: true,
+		},
+		{
+			name:         "gemini finishReason MAX_TOKENS is an incomplete terminal",
+			dialect:      Gemini,
+			event:        Event{Data: `{"candidates":[{"finishReason":"MAX_TOKENS","index":0}]}`},
+			want:         EventIncomplete,
+			wantTerminal: true,
+		},
+		{
+			name:         "gemini finishReason SAFETY is an incomplete terminal",
+			dialect:      Gemini,
+			event:        Event{Data: `{"candidates":[{"finishReason":"SAFETY","index":0}]}`},
+			want:         EventIncomplete,
+			wantTerminal: true,
+		},
+		{
+			// Values the finish mapping does not name settle on stop, the way
+			// the reference's mapper treats an unknown reason.
+			name:         "gemini unknown finishReason is still a completion",
+			dialect:      Gemini,
+			event:        Event{Data: `{"candidates":[{"finishReason":"WAT","index":0}]}`},
+			want:         EventComplete,
+			wantTerminal: true,
+		},
+		{
+			name:         "gemini blocked prompt is an incomplete terminal",
+			dialect:      Gemini,
+			event:        Event{Data: `{"promptFeedback":{"blockReason":"SAFETY"},"usageMetadata":{"promptTokenCount":5}}`},
+			want:         EventIncomplete,
+			wantTerminal: true,
+		},
+		{
+			name:    "gemini usage-only frame is prelude",
+			dialect: Gemini,
+			event:   Event{Data: `{"usageMetadata":{"promptTokenCount":5,"totalTokenCount":5}}`},
+			want:    EventPrelude,
+		},
+		{
+			// This wire has no sentinel of its own; one arriving names no fact
+			// of it. (A relay's sentinel is still a source close for the folds.)
+			name:    "gemini does not claim the done sentinel",
+			dialect: Gemini,
+			event:   Event{Data: "[DONE]"},
+			want:    EventUnknown,
+		},
+		{
+			// The empty-dialect inference must reach the gemini classifier on
+			// its own framing keys — candidates, promptFeedback, usageMetadata —
+			// because the observer classifies with no dialect at all.
+			name:         "untyped finishReason frame infers gemini",
+			event:        Event{Data: `{"candidates":[{"finishReason":"STOP","index":0}]}`},
+			want:         EventComplete,
+			wantTerminal: true,
+		},
+		{
+			name:  "untyped usageMetadata frame infers gemini",
+			event: Event{Data: `{"usageMetadata":{"promptTokenCount":5}}`},
+			want:  EventPrelude,
+		},
 	}
 
 	for _, tt := range tests {
@@ -212,6 +312,7 @@ func TestClassifyFailurePayloadIsDialectScoped(t *testing.T) {
 		{"chat error envelope", Chat, Event{Data: `{"error":{"message":"bad"}}`}, EventFailure},
 		{"responses failed event", Responses, Event{Data: `{"type":"response.failed","response":{"error":{"message":"bad"}}}`}, EventFailure},
 		{"message error event", Messages, Event{Data: `{"type":"error","error":{"message":"bad"}}`}, EventFailure},
+		{"gemini error envelope", Gemini, Event{Data: `{"error":{"code":429,"message":"quota"}}`}, EventFailure},
 		{"unknown messages error-shaped extension", Messages, Event{Data: `{"type":"message","error":{"message":"extension"}}`}, EventUnknown},
 	}
 	for _, tc := range tests {
@@ -223,10 +324,61 @@ func TestClassifyFailurePayloadIsDialectScoped(t *testing.T) {
 	}
 }
 
+// The gemini wire's failure frame must classify as a failure with the dialect
+// stated EXPLICITLY, not only through the empty-dialect path that happens to
+// infer Chat for a bare error key first.
+func TestClassifyGeminiErrorIsTerminalFailure(t *testing.T) {
+	facts := ClassifyEvent(Gemini, Event{Data: `{"error":{"code":429,"message":"quota"}}`})
+	if facts.Kind != EventFailure || !facts.Terminal {
+		t.Fatalf("facts = %+v, want a terminal failure", facts)
+	}
+}
+
+// Usage rides the wire's own usageMetadata member, on content frames and the
+// usage tail alike; HasUsage must state it either way.
+func TestClassifyGeminiUsage(t *testing.T) {
+	tail := ClassifyEvent(Gemini, Event{Data: `{"usageMetadata":{"promptTokenCount":5}}`})
+	if !tail.HasUsage {
+		t.Fatalf("usage tail HasUsage = false")
+	}
+	terminal := ClassifyEvent(Gemini, Event{Data: `{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"totalTokenCount":5}}`})
+	if !terminal.HasUsage {
+		t.Fatalf("terminal frame HasUsage = false")
+	}
+}
+
+// A Chat frame's keys (choices, usage) must keep their Chat reading when the
+// dialect is inferred, and the gemini keys must not reach for a typed frame:
+// the two vocabularies never share a key name, so the order only has to keep
+// them apart deterministically. Bare Chat chunks have never claimed a dialect
+// here (only the sentinel does); what matters is that they are not claimed BY
+// the gemini inference.
+func TestEventDialectInferenceKeepsChatAndGeminiApart(t *testing.T) {
+	if got := (Event{Data: `[DONE]`}).Dialect(); got != Chat {
+		t.Fatalf("sentinel dialect = %q, want chat", got)
+	}
+	if got := (Event{Data: `{"choices":[{"delta":{"content":"hi"}}]}`}).Dialect(); got != "" {
+		t.Fatalf("choices frame dialect = %q, want unresolved", got)
+	}
+	if got := (Event{Data: `{"usage":{"prompt_tokens":1}}`}).Dialect(); got != "" {
+		t.Fatalf("usage frame dialect = %q, want unresolved", got)
+	}
+	if got := (Event{Data: `{"candidates":[{"content":{"parts":[{"text":"hi"}]}}]}`}).Dialect(); got != Gemini {
+		t.Fatalf("candidates frame dialect = %q, want gemini", got)
+	}
+	if got := (Event{Data: `{"usageMetadata":{"promptTokenCount":1}}`}).Dialect(); got != Gemini {
+		t.Fatalf("usageMetadata frame dialect = %q, want gemini", got)
+	}
+	if got := (Event{Data: `{"promptFeedback":{"blockReason":"SAFETY"}}`}).Dialect(); got != Gemini {
+		t.Fatalf("promptFeedback frame dialect = %q, want gemini", got)
+	}
+}
+
 func FuzzClassifyFramedSSEDoesNotPanic(f *testing.F) {
 	f.Add("data: {\"type\":\"response.created\"}\n\n")
 	f.Add("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n")
 	f.Add("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"x\"}}\n\n")
+	f.Add("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":1}}\n\n")
 	f.Fuzz(func(t *testing.T, wire string) {
 		if len(wire) > maxEventBytes*2 {
 			t.Skip()
@@ -236,6 +388,7 @@ func FuzzClassifyFramedSSEDoesNotPanic(f *testing.F) {
 			ClassifyEvent(Responses, ev)
 			ClassifyEvent(Messages, ev)
 			ClassifyEvent(Chat, ev)
+			ClassifyEvent(Gemini, ev)
 			return nil
 		}
 		if err := framer.Feed([]byte(wire), consume); err == nil {

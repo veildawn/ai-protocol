@@ -81,13 +81,18 @@ func ClassifyEvent(d Dialect, ev Event) EventFacts {
 			// marks a Chat chunk that carries neither a type nor an error —
 			// including the finish_reason close. A frame carrying nothing but
 			// usage is the Chat usage tail, which is how the observer, which
-			// classifies with an inferred dialect, sees one at all.
+			// classifies with an inferred dialect, sees one at all. Only after
+			// those does the generateContent wire get its turn: its framing keys
+			// are candidates / promptFeedback / usageMetadata, none of which a
+			// typed or choice-carrying frame ever holds.
 			if _, ok := obj["error"]; ok {
 				d = Chat
 			} else if _, ok := obj["choices"]; ok {
 				d = Chat
 			} else if _, ok := obj["usage"]; ok {
 				d = Chat
+			} else if typ == "" && geminiFrameKeys(obj) {
+				d = Gemini
 			}
 		}
 	}
@@ -103,12 +108,15 @@ func ClassifyEvent(d Dialect, ev Event) EventFacts {
 		facts = classifyMessagesEvent(typ, obj)
 	case Responses:
 		facts = classifyResponsesEvent(typ, obj)
+	case Gemini:
+		facts = classifyGeminiEvent(obj)
 	default:
 		facts = EventFacts{Kind: EventUnknown}
 	}
 	facts.Terminal = facts.Kind == EventIncomplete ||
 		(d == Messages && typ == "message_stop") ||
-		(d == Responses && typ == "response.completed")
+		(d == Responses && typ == "response.completed") ||
+		(d == Gemini && geminiClosed(obj))
 	return facts
 }
 
@@ -130,7 +138,11 @@ func isFailureEvent(typ string, d Dialect, obj map[string]json.RawMessage) bool 
 		return true
 	}
 	if _, ok := obj["error"]; ok {
-		return d == Chat
+		// The bare error frame is shared by the Chat wire and the
+		// generateContent wire — same shape, same meaning: a failure the
+		// stream reports about itself. Both dialects must see it as a failure
+		// without leaning on the empty-dialect inference happening to pick one.
+		return d == Chat || d == Gemini
 	}
 	// A Chat chunk closing with the literal finish_reason "error" is the wire's
 	// own failure close: several OpenAI-compatible backends end the turn that
@@ -204,6 +216,132 @@ func classifyChatEvent(obj map[string]json.RawMessage) EventFacts {
 		}
 	}
 	return EventFacts{Kind: EventPrelude}
+}
+
+// classifyGeminiEvent classifies one frame of the generateContent wire.
+//
+// That wire has no [DONE] sentinel and no separate terminal frame: the only
+// things that declare how the turn ended are a candidate's finishReason and a
+// blocked promptFeedback (which the reference folds into a content_filter
+// close). Both are unioned into "the source closed itself" — a frame carrying
+// either IS this dialect's terminal, unlike Chat where finish_reason is a
+// logical completion but [DONE] is the wire terminal.
+func classifyGeminiEvent(obj map[string]json.RawMessage) EventFacts {
+	hasUsage := hasJSONValue(obj["usageMetadata"])
+	if raw := obj["promptFeedback"]; len(raw) > 0 {
+		if pf := rawObject(raw); pf != nil && hasJSONValue(pf["blockReason"]) {
+			// A blocked prompt ends the turn, but not successfully.
+			return EventFacts{Kind: EventIncomplete, HasUsage: hasUsage}
+		}
+	}
+	if raw := obj["candidates"]; len(raw) > 0 {
+		var candidates []map[string]json.RawMessage
+		if json.Unmarshal(raw, &candidates) == nil {
+			for _, cand := range candidates {
+				if reason := rawString(cand["finishReason"]); reason != "" {
+					return EventFacts{Kind: geminiFinishKind(reason), HasUsage: hasUsage}
+				}
+			}
+			for _, cand := range candidates {
+				if kind, ok := geminiCandidateContent(cand); ok {
+					return EventFacts{Kind: kind, HasUsage: hasUsage}
+				}
+			}
+		}
+		return EventFacts{Kind: EventPrelude, HasUsage: hasUsage}
+	}
+	// A frame with no candidates at all is the usage tail: evidence for the
+	// observer, not client-visible output.
+	return EventFacts{Kind: EventPrelude, HasUsage: hasUsage}
+}
+
+// geminiClosed reports whether a frame states, in the generateContent wire's
+// own terms, that the turn has ended: any candidate carrying a non-empty
+// finishReason, or a promptFeedback naming why the turn never started. These
+// two facts are the union of that dialect's close signals — there is no
+// sentinel to wait for after them.
+func geminiClosed(obj map[string]json.RawMessage) bool {
+	if raw := obj["promptFeedback"]; len(raw) > 0 {
+		if pf := rawObject(raw); pf != nil && hasJSONValue(pf["blockReason"]) {
+			return true
+		}
+	}
+	raw := obj["candidates"]
+	if len(raw) == 0 {
+		return false
+	}
+	var candidates []map[string]json.RawMessage
+	if json.Unmarshal(raw, &candidates) != nil {
+		return false
+	}
+	for _, cand := range candidates {
+		if rawString(cand["finishReason"]) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// geminiFinishKind maps a finishReason onto completion facts through the same
+// chat finish_reason mapping the reference's response fold uses: the length and
+// content-filter families end the turn without success; everything the mapping
+// settles on stop (including values the table does not name) is a completion.
+func geminiFinishKind(reason string) EventKind {
+	switch reason {
+	case "MAX_TOKENS":
+		return EventIncomplete
+	case "SAFETY", "RECITATION", "LANGUAGE", "OTHER", "BLOCKLIST",
+		"PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT":
+		return EventIncomplete
+	default:
+		return EventComplete
+	}
+}
+
+// geminiCandidateContent classifies one candidate's parts. A non-thought text
+// or a named function call is client-visible content; a thought part's text is
+// reasoning; a lone thoughtSignature, an empty part list, or a candidate
+// carrying only its index and role says nothing the client has seen.
+func geminiCandidateContent(cand map[string]json.RawMessage) (EventKind, bool) {
+	var wrapper struct {
+		Parts []map[string]json.RawMessage `json:"parts"`
+	}
+	if json.Unmarshal(cand["content"], &wrapper) != nil {
+		return EventUnknown, false
+	}
+	for _, part := range wrapper.Parts {
+		text := part["text"]
+		if hasJSONValue(text) {
+			if partIsThought(part) {
+				return EventReasoning, true
+			}
+			return EventContent, true
+		}
+		if fc := rawObject(part["functionCall"]); fc != nil {
+			if hasJSONValue(fc["name"]) {
+				return EventContent, true
+			}
+			if raw, ok := fc["args"]; ok && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+				return EventContent, true
+			}
+		}
+	}
+	return EventUnknown, false
+}
+
+// partIsThought reports whether a part is marked as thinking output.
+func partIsThought(part map[string]json.RawMessage) bool {
+	var b bool
+	return json.Unmarshal(part["thought"], &b) == nil && b
+}
+
+// geminiFrameKeys reports whether an untyped, choice-less frame carries the
+// generateContent wire's framing keys.
+func geminiFrameKeys(obj map[string]json.RawMessage) bool {
+	_, candidates := obj["candidates"]
+	_, promptFeedback := obj["promptFeedback"]
+	_, usageMetadata := obj["usageMetadata"]
+	return candidates || promptFeedback || usageMetadata
 }
 
 func classifyMessagesEvent(typ string, obj map[string]json.RawMessage) EventFacts {

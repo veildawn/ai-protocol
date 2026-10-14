@@ -1,0 +1,79 @@
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "weather?"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "function_call": {
+            "args": {
+              "city": "Boston"
+            },
+            "name": "get_weather"
+          }
+        }
+      ],
+      "role": "model"
+    },
+    {
+      "parts": [
+        {
+          "function_response": {
+            "name": "get_weather",
+            "response": {
+              "content": "sunny"
+            }
+          }
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "generationConfig": {
+    "max_output_tokens": 32,
+    "stop_sequences": [
+      "END"
+    ],
+    "temperature": 0.5,
+    "thinkingConfig": {
+      "includeThoughts": true,
+      "thinkingBudget": 4096
+    }
+  },
+  "system_instruction": {
+    "parts": [
+      {
+        "text": "be brief"
+      }
+    ]
+  },
+  "toolConfig": {
+    "functionCallingConfig": {
+      "mode": "ANY"
+    }
+  },
+  "tools": [
+    {
+      "function_declarations": [
+        {
+          "description": "d",
+          "name": "lookup",
+          "parameters": {
+            "properties": {
+              "q": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        }
+      ]
+    }
+  ]
+}

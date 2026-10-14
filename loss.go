@@ -19,6 +19,10 @@ const (
 	LossStructuredOutput Loss = "structured_output"
 	LossToolArguments    Loss = "tool_arguments"
 	LossUnknownContent   Loss = "unknown_content"
+	// LossNativeParam names a source parameter (or tool form) that only the
+	// source wire defines: the target request body has no spelling for it, so
+	// it is dropped rather than carried in a shape the target rejects.
+	LossNativeParam Loss = "native_param"
 )
 
 // LossSet is a set of losses keyed for cheap union and membership checks.
@@ -58,19 +62,44 @@ func StaticLosses(from, to Dialect) LossSet {
 	if !ok {
 		return nil
 	}
-	out := LossSet{}.Add(LossLogitBias, LossLogprobs, LossMultiChoice, LossToolArguments, LossUnknownContent)
+	// The universal predicates self-filter on the body, so they are always in.
+	// The baseline beyond them is per-direction: the six pairs that do not
+	// touch the generateContent wire keep their sets name-for-name, and the
+	// six that do carry only what that wire can express (logprobs and
+	// candidate counts fold onto it, so they stop being losses there; see
+	// geminiLosses for the rows that name what it cannot hold).
+	out := LossSet{}.Add(LossToolArguments, LossUnknownContent)
 	switch {
 	case src == Chat && dst == Messages:
 		// Structured output is NOT listed for chat->messages: both forms fold
 		// (json_schema and json_object become output_format), matching the
 		// reference, which keeps response_format for Anthropic targets.
-		return out.Add(LossSeed, LossPenaltyControls, LossFileReference)
+		return out.Add(LossLogitBias, LossLogprobs, LossMultiChoice, LossSeed, LossPenaltyControls, LossFileReference)
 	case src == Responses && dst == Messages:
 		// Only the json_object body form is lost here (the fold has a branch
 		// for json_schema alone); see bodyHasStructuredOutput.
-		return out.Add(LossFileReference, LossStructuredOutput)
+		return out.Add(LossLogitBias, LossLogprobs, LossMultiChoice, LossFileReference, LossStructuredOutput)
+	case src == Gemini || dst == Gemini:
+		return out.Add(geminiLosses(src, dst)...)
 	default:
-		return out
+		return out.Add(LossLogitBias, LossLogprobs, LossMultiChoice)
+	}
+}
+
+// geminiLosses lists what one conversion touching the generateContent wire can
+// lose beyond the two universal predicates. Logprobs and multi-choice ARE
+// expressible there (they fold onto the wire's own response config fields), so
+// they appear only where the target is Messages or Responses, whose loss rows
+// already list them. Seed and penalty controls fold in both directions and are
+// never lost; structured output and file references fold both ways too.
+func geminiLosses(src, dst Dialect) []Loss {
+	switch {
+	case src == Chat && dst == Gemini:
+		return []Loss{LossLogitBias, LossNativeParam}
+	case src == Messages && dst == Gemini, src == Responses && dst == Gemini, src == Gemini && dst == Chat:
+		return []Loss{LossNativeParam}
+	default: // src == Gemini && (dst == Messages || dst == Responses)
+		return []Loss{LossLogprobs, LossMultiChoice, LossNativeParam}
 	}
 }
 
@@ -116,7 +145,82 @@ func BodyLosses(from, to Dialect, body []byte, opts ConvertOptions) LossSet {
 	if has(LossToolArguments) && bodyHasInvalidToolArguments(payload, src) {
 		out.Add(LossToolArguments)
 	}
+	if has(LossNativeParam) && bodyHasNativeParam(payload, src, dst) {
+		out.Add(LossNativeParam)
+	}
 	return out
+}
+
+// bodyHasNativeParam reports whether the source body carries a key (or tool
+// form) only the source wire defines. Key presence is the predicate: what the
+// key folds to either lands somewhere on the target wire or it does not, and
+// the rows here are the ones that do not.
+func bodyHasNativeParam(payload map[string]any, src, dst Dialect) bool {
+	present := func(keys ...string) bool {
+		for _, key := range keys {
+			if payloadPresent(payload, key) {
+				return true
+			}
+		}
+		return false
+	}
+	switch {
+	case src == Chat && dst == Gemini:
+		// The first five are refused without DropParams and dropped with it;
+		// the rest are accepted but the target request builder never reads
+		// them. Either way the feature does not survive.
+		return present("function_call", "metadata", "prediction", "store",
+			"context_management", "user", "stream_options", "timeout",
+			"extra_headers", "speed", "cache_control")
+	case src == Messages && dst == Gemini:
+		// metadata.user_id folds to a chat parameter the builder ignores; the
+		// rest of metadata has no landing at all. cache_control lands the same
+		// nowhere; context_management is refused or dropped.
+		return present("metadata", "cache_control", "context_management")
+	case src == Responses && dst == Gemini:
+		// reasoning.effort folds onto the wire's thinking config; the summary
+		// it may carry does not, so a reasoning key is a native-param loss.
+		return present("metadata", "user", "context_management", "reasoning")
+	case src == Gemini:
+		return geminiBodyHasNativeParam(payload)
+	default:
+		return false
+	}
+}
+
+// geminiBodyHasNativeParam reports the generateContent body's native-only
+// surface: safety and cache handles the other dialects have no parameter for,
+// generation knobs with no counterpart, and tool forms beyond function
+// declarations and hosted search.
+func geminiBodyHasNativeParam(payload map[string]any) bool {
+	if payloadPresent(payload, "safetySettings") || payloadPresent(payload, "cachedContent") {
+		return true
+	}
+	if gc, _ := payload["generationConfig"].(map[string]any); gc != nil {
+		for _, key := range []string{"speechConfig", "imageConfig", "responseFormat", "mediaResolution"} {
+			if payloadPresent(gc, key) {
+				return true
+			}
+		}
+	}
+	if tc, _ := payload["toolConfig"].(map[string]any); tc != nil {
+		if payloadPresent(tc, "includeServerSideToolInvocations") {
+			return true
+		}
+	}
+	tools, _ := payload["tools"].([]any)
+	for _, raw := range tools {
+		tool, _ := raw.(map[string]any)
+		if tool == nil {
+			continue
+		}
+		for key := range tool {
+			if key != "function_declarations" && key != "googleSearch" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func payloadPresent(payload map[string]any, key string) bool {

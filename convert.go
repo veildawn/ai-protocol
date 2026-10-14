@@ -8,6 +8,9 @@ import (
 
 	"github.com/veildawn/ai-protocol/chatmessages"
 	"github.com/veildawn/ai-protocol/chatresponses"
+	"github.com/veildawn/ai-protocol/geminichat"
+	"github.com/veildawn/ai-protocol/geminimessages"
+	"github.com/veildawn/ai-protocol/geminiresponses"
 	"github.com/veildawn/ai-protocol/internal/cerr"
 	"github.com/veildawn/ai-protocol/internal/jsonx"
 	"github.com/veildawn/ai-protocol/messagesresponses"
@@ -98,6 +101,18 @@ func convertRequest(from, to Dialect, body []byte, opts ConvertOptions) (Convert
 		out, err = messagesresponses.MessagesToResponses(obj)
 	case src == Responses && dst == Messages:
 		out, err = messagesresponses.ResponsesRequestToMessages(obj)
+	case src == Chat && dst == Gemini:
+		out, err = geminichat.ChatToGemini(obj, dropParams)
+	case src == Gemini && dst == Chat:
+		out, err = geminichat.GeminiToChat(obj)
+	case src == Messages && dst == Gemini:
+		out, err = geminimessages.MessagesToGemini(obj, dropParams)
+	case src == Gemini && dst == Messages:
+		out, err = geminimessages.GeminiToMessages(obj)
+	case src == Responses && dst == Gemini:
+		out, err = geminiresponses.ResponsesToGemini(obj, dropParams)
+	case src == Gemini && dst == Responses:
+		out, err = geminiresponses.GeminiToResponses(obj)
 	default:
 		return Converted{}, fmt.Errorf("unsupported conversion %s -> %s", src, dst)
 	}
@@ -164,6 +179,18 @@ func ConvertResponseWith(from, to Dialect, body []byte, opts ConvertOptions) ([]
 		out = messagesresponses.MessagesResponseToResponses(obj)
 	case src == Responses && dst == Messages:
 		out, err = messagesresponses.ResponsesToMessages(obj)
+	case src == Chat && dst == Gemini:
+		out = geminichat.ChatResponseToGemini(obj)
+	case src == Gemini && dst == Chat:
+		out = geminichat.GeminiResponseToChat(obj)
+	case src == Messages && dst == Gemini:
+		out = geminimessages.MessagesResponseToGemini(obj)
+	case src == Gemini && dst == Messages:
+		out = geminimessages.GeminiResponseToMessages(obj)
+	case src == Responses && dst == Gemini:
+		out = geminiresponses.ResponsesResponseToGemini(obj)
+	case src == Gemini && dst == Responses:
+		out = geminiresponses.GeminiResponseToResponses(obj)
 	default:
 		return nil, fmt.Errorf("unsupported conversion %s -> %s", src, dst)
 	}
@@ -227,6 +254,30 @@ func PipeStreamWith(from, to Dialect, dst io.Writer, source io.Reader, opts Stre
 	case src == Responses && dstDialect == Messages:
 		pipe = func(w io.Writer, r io.Reader) (int64, error) {
 			return messagesresponses.PipeResponsesToMessages(w, r, messagesresponses.StreamOpts{Flush: opts.Flush, Model: opts.Model, OnEvent: opts.OnEvent})
+		}
+	case src == Chat && dstDialect == Gemini:
+		pipe = func(w io.Writer, r io.Reader) (int64, error) {
+			return geminichat.PipeChatToGemini(w, r, geminichat.StreamOpts{Flush: opts.Flush, Model: opts.Model, OnEvent: opts.OnEvent})
+		}
+	case src == Gemini && dstDialect == Chat:
+		pipe = func(w io.Writer, r io.Reader) (int64, error) {
+			return geminichat.PipeGeminiToChat(w, r, geminichat.StreamOpts{Flush: opts.Flush, Model: opts.Model, OnEvent: opts.OnEvent})
+		}
+	case src == Messages && dstDialect == Gemini:
+		pipe = func(w io.Writer, r io.Reader) (int64, error) {
+			return geminimessages.PipeMessagesToGemini(w, r, geminimessages.StreamOpts{Flush: opts.Flush, Model: opts.Model, OnEvent: opts.OnEvent})
+		}
+	case src == Gemini && dstDialect == Messages:
+		pipe = func(w io.Writer, r io.Reader) (int64, error) {
+			return geminimessages.PipeGeminiToMessages(w, r, geminimessages.StreamOpts{Flush: opts.Flush, Model: opts.Model, OnEvent: opts.OnEvent})
+		}
+	case src == Responses && dstDialect == Gemini:
+		pipe = func(w io.Writer, r io.Reader) (int64, error) {
+			return geminiresponses.PipeResponsesToGemini(w, r, geminiresponses.StreamOpts{Flush: opts.Flush, Model: opts.Model, OnEvent: opts.OnEvent})
+		}
+	case src == Gemini && dstDialect == Responses:
+		pipe = func(w io.Writer, r io.Reader) (int64, error) {
+			return geminiresponses.PipeGeminiToResponses(w, r, geminiresponses.StreamOpts{Flush: opts.Flush, Model: opts.Model, OnEvent: opts.OnEvent})
 		}
 	default:
 		return StreamResult{}, fmt.Errorf("unsupported stream conversion %s -> %s", src, dstDialect)

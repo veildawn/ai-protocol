@@ -1,0 +1,39 @@
+{
+  "input": [
+    {
+      "content": [
+        {
+          "text": "hello",
+          "type": "input_text"
+        }
+      ],
+      "role": "user",
+      "type": "message"
+    }
+  ],
+  "instructions": "be brief",
+  "max_output_tokens": 32,
+  "model": "gpt-4o",
+  "prompt_cache_key": "u1",
+  "reasoning": {
+    "effort": "medium"
+  },
+  "tool_choice": "auto",
+  "tools": [
+    {
+      "description": "d",
+      "name": "lookup",
+      "parameters": {
+        "properties": {
+          "q": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "strict": false,
+      "type": "function"
+    }
+  ],
+  "user": "u1"
+}

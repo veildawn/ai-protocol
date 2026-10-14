@@ -20,6 +20,11 @@ const (
 	messagesStop      = `event: message_stop` + "\n" + `data: {"type":"message_stop"}` + "\n\n"
 	chatOpen          = `data: {"id":"c1","model":"m","choices":[{"index":0,"delta":{"content":"hello"}}]}` + "\n\n"
 	relayDone         = "data: [DONE]\n\n"
+
+	geminiOpen    = `data: {"candidates":[{"content":{"role":"model","parts":[{"text":"hello"}]},"index":0}],"responseId":"r1"}` + "\n\n"
+	geminiStop    = `data: {"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":3,"totalTokenCount":8},"responseId":"r1"}` + "\n\n"
+	geminiBlocked = `data: {"promptFeedback":{"blockReason":"SAFETY"},"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":0,"totalTokenCount":5}}` + "\n\n"
+	geminiError   = `data: {"error":{"code":429,"message":"quota exceeded"}}` + "\n\n"
 )
 
 func pipeFor(t *testing.T, from, to Dialect, src string) (string, StreamResult) {
@@ -34,7 +39,7 @@ func pipeFor(t *testing.T, from, to Dialect, src string) (string, StreamResult) 
 
 func assertNoTerminal(t *testing.T, out string) {
 	t.Helper()
-	for _, marker := range []string{`"finish_reason":"stop"`, "[DONE]", "message_stop", "response.completed"} {
+	for _, marker := range []string{`"finish_reason":"stop"`, "[DONE]", "message_stop", "response.completed", "finishReason"} {
 		if strings.Contains(out, marker) {
 			t.Fatalf("truncated source was closed for the client with %q:\n%s", marker, out)
 		}
@@ -263,5 +268,140 @@ func TestMessagesToResponsesCeilingCutIsIncompleteWithReason(t *testing.T) {
 	}
 	if strings.Contains(out, "incomplete_details") {
 		t.Fatalf("ceiling cut carried an incomplete_details the reference leaves null:\n%s", out)
+	}
+}
+
+// The gemini wire's only close signals are a candidate's finishReason and a
+// blocked promptFeedback — there is no sentinel and no separate terminal
+// frame. A source that ends with neither was cut, and the fold must not
+// invent one; a source that did state one is closed, terminal and all.
+func TestGeminiToChatTruncationIsNotACompletion(t *testing.T) {
+	out, res := pipeFor(t, Gemini, Chat, geminiOpen)
+	if !res.Truncated || res.Terminal || res.InBandErr != nil {
+		t.Fatalf("result=%+v", res)
+	}
+	assertNoTerminal(t, out)
+	if !strings.Contains(out, `"content":"hello"`) {
+		t.Fatalf("delivered content lost:\n%s", out)
+	}
+}
+
+func TestGeminiToChatClosesOnItsFinishReasonFrame(t *testing.T) {
+	out, res := pipeFor(t, Gemini, Chat, geminiOpen+geminiStop)
+	if !res.Terminal || res.Truncated || res.InBandErr != nil {
+		t.Fatalf("result=%+v", res)
+	}
+	if !strings.Contains(out, `"finish_reason":"stop"`) || !strings.Contains(out, "[DONE]") {
+		t.Fatalf("finishReason frame was not folded into a chat terminal:\n%s", out)
+	}
+	// The usage rides the same wire frame as the finish and must survive the
+	// fold onto the chat finish chunk.
+	if !strings.Contains(out, `"usage"`) {
+		t.Fatalf("terminal usage lost:\n%s", out)
+	}
+}
+
+// A blocked prompt is a close the source stated itself: it ends the turn, but
+// as a filter, not a success.
+func TestGeminiToChatBlockedPromptClosesAsContentFilter(t *testing.T) {
+	out, res := pipeFor(t, Gemini, Chat, geminiBlocked)
+	if !res.Terminal || res.Truncated || res.InBandErr != nil {
+		t.Fatalf("result=%+v", res)
+	}
+	if !strings.Contains(out, `"finish_reason":"content_filter"`) || !strings.Contains(out, "[DONE]") {
+		t.Fatalf("blocked prompt not folded into a filtered close:\n%s", out)
+	}
+}
+
+func TestGeminiToMessagesTruncationIsNotACompletion(t *testing.T) {
+	out, res := pipeFor(t, Gemini, Messages, geminiOpen)
+	if !res.Truncated || res.Terminal || res.InBandErr != nil {
+		t.Fatalf("result=%+v", res)
+	}
+	assertNoTerminal(t, out)
+	if !strings.Contains(out, `"text_delta"`) {
+		t.Fatalf("delivered text lost:\n%s", out)
+	}
+}
+
+func TestGeminiToResponsesTruncationIsNotACompletion(t *testing.T) {
+	// Two text frames: the first spends its delta on the item announcement
+	// (the reference's announce-then-delta shape), so the second is the one
+	// whose delta the client sees before the cut.
+	src := geminiOpen + `data: {"candidates":[{"content":{"role":"model","parts":[{"text":" there"}]},"index":0}],"responseId":"r1"}` + "\n\n"
+	out, res := pipeFor(t, Gemini, Responses, src)
+	if !res.Truncated || res.Terminal || res.InBandErr != nil {
+		t.Fatalf("result=%+v", res)
+	}
+	assertNoTerminal(t, out)
+	if !strings.Contains(out, `"delta":" there"`) {
+		t.Fatalf("delivered text lost:\n%s", out)
+	}
+}
+
+// Folding INTO the gemini wire follows the same rule from the other side: the
+// terminal frame (finishReason + usage on one frame) is written only when the
+// source closed itself; a cut source leaves the target stream open.
+func TestChatToGeminiTruncationIsNotACompletion(t *testing.T) {
+	out, res := pipeFor(t, Chat, Gemini, chatOpen)
+	if !res.Truncated || res.Terminal || res.InBandErr != nil {
+		t.Fatalf("result=%+v", res)
+	}
+	assertNoTerminal(t, out)
+	if !strings.Contains(out, `"text":"hello"`) {
+		t.Fatalf("delivered content lost:\n%s", out)
+	}
+}
+
+func TestMessagesToGeminiTruncationIsNotACompletion(t *testing.T) {
+	out, res := pipeFor(t, Messages, Gemini, messagesOpen)
+	if !res.Truncated || res.Terminal || res.InBandErr != nil {
+		t.Fatalf("result=%+v", res)
+	}
+	assertNoTerminal(t, out)
+	if !strings.Contains(out, `"text":"hello"`) {
+		t.Fatalf("delivered content lost:\n%s", out)
+	}
+}
+
+func TestChatToGeminiClosesOnSourceFinish(t *testing.T) {
+	src := chatOpen +
+		`data: {"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}` + "\n\n" +
+		relayDone
+	out, res := pipeFor(t, Chat, Gemini, src)
+	if !res.Terminal || res.Truncated || res.InBandErr != nil {
+		t.Fatalf("result=%+v", res)
+	}
+	if !strings.Contains(out, `"finishReason":"STOP"`) || !strings.Contains(out, `"usageMetadata"`) {
+		t.Fatalf("source close not folded into the wire's terminal frame:\n%s", out)
+	}
+}
+
+// An in-band error frame ends the stream without an answer. It must surface as
+// InBandErr for the host and close nothing for the client — the same contract
+// the typed dialects' error frames already follow.
+func TestGeminiInBandFailureIsNotACompletion(t *testing.T) {
+	src := geminiOpen + geminiError
+	out, res := pipeFor(t, Gemini, Chat, src)
+	if res.InBandErr == nil || res.InBandErr.Error() != "quota exceeded" {
+		t.Fatalf("in-band error lost: %+v", res)
+	}
+	assertNoTerminal(t, out)
+}
+
+// A Chat source that closes on the bare usage tail — the ending several
+// vendors send instead of a finish_reason or [DONE] — has still closed: the
+// observer settles it Terminal, so every Chat-source fold must close the turn
+// for its client too, or the host books a delivered turn while the client's
+// stream never ends. The gemini fold names the wire's natural stop and states
+// the counts the tail carried.
+func TestChatToGeminiUsageCloseStillCloses(t *testing.T) {
+	src := chatOpen + `data: {"id":"c1","model":"m","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}` + "\n\n"
+	out, res := pipeFor(t, Chat, Gemini, src)
+	if !res.Terminal || res.Truncated || res.InBandErr != nil {
+		t.Fatalf("result=%+v", res)
+	}
+	if !strings.Contains(out, `"finishReason":"STOP"`) || !strings.Contains(out, `"usageMetadata"`) {
+		t.Fatalf("usage close not folded into the wire's terminal frame:\n%s", out)
 	}
 }
