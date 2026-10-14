@@ -79,7 +79,7 @@ func TestGeminiMessagesParityRequestTwoHopSample(t *testing.T) {
 	 "stop_sequences":["END"]}`)
 	want := gmParityDecode(t, `{"contents":[
 	    {"role":"user","parts":[{"text":"hello"}]},
-	    {"role":"model","parts":[{"text":"hi"},{"function_call":{"name":"lookup","args":{"q":"x"}}}]},
+	    {"role":"model","parts":[{"text":"hi"},{"function_call":{"name":"lookup","args":{"q":"x"}},"thoughtSignature":"skip_thought_signature_validator"}]},
 	    {"role":"user","parts":[{"function_response":{"name":"lookup","response":{"content":"res"}}}]}],
 	  "system_instruction":{"parts":[{"text":"be brief"}]},
 	  "tools":[{"function_declarations":[{"name":"lookup","description":"d",
@@ -114,7 +114,7 @@ func TestGeminiMessagesParityRequestMergingAndToolResults(t *testing.T) {
 	    {"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"{\"ok\": true, \"n\": 2}"}]}]}`)
 	want = gmParityDecode(t, `{"contents":[
 	    {"role":"user","parts":[{"text":"go"}]},
-	    {"role":"model","parts":[{"function_call":{"name":"f","args":{"a":1}}}]},
+	    {"role":"model","parts":[{"function_call":{"name":"f","args":{"a":1}},"thoughtSignature":"skip_thought_signature_validator"}]},
 	    {"role":"user","parts":[{"function_response":{"name":"f","response":{"n":2,"ok":true}}}]}],
 	  "generationConfig":{"max_output_tokens":8}}`)
 	gmParityEqual(t, got, want, "json-object tool result")
@@ -126,7 +126,7 @@ func TestGeminiMessagesParityRequestMergingAndToolResults(t *testing.T) {
 	      "content":[{"type":"text","text":"x"},{"type":"text","text":"y"}]}]}]}`)
 	want = gmParityDecode(t, `{"contents":[
 	    {"role":"user","parts":[{"text":"go"}]},
-	    {"role":"model","parts":[{"function_call":{"name":"f","args":{}}}]},
+	    {"role":"model","parts":[{"function_call":{"name":"f","args":{}},"thoughtSignature":"skip_thought_signature_validator"}]},
 	    {"role":"user","parts":[{"function_response":{"name":"f","response":{"content":"xy"}}}]}],
 	  "generationConfig":{"max_output_tokens":8}}`)
 	gmParityEqual(t, got, want, "multi-part tool result")
@@ -189,13 +189,14 @@ func TestGeminiMessagesParityRequestThinkingBlocks(t *testing.T) {
 	gmParityEqual(t, got, want, "unsigned thinking block fold")
 }
 
-// A call whose tool_use block carried no signature is lifted the turn's
-// thinking-block signature: the target rejects a replayed functionCall part
-// without one (INVALID_ARGUMENT, verified against the live upstream), and the
-// client this fold serves round-trips thinking signatures but drops the
-// tool_use's provider_specific_fields. The call's own signature, when the
-// client did preserve it, wins over the lift.
-func TestGeminiMessagesParityCallSignatureLift(t *testing.T) {
+// A call whose tool_use block carried no signature is sent with the upstream's
+// skip marker: the target rejects a replayed functionCall part without a
+// thoughtSignature and validates the value (INVALID_ARGUMENT both for a
+// missing signature and for a borrowed one — verified against the live
+// upstream), and the client this fold serves drops the tool_use's
+// provider_specific_fields. The call's own signature, when the client did
+// preserve it, rides verbatim.
+func TestGeminiMessagesParityCallSignature(t *testing.T) {
 	got := gmParityFold(t, `{"model":"m","max_tokens":8,"messages":[
 	    {"role":"user","content":"q"},
 	    {"role":"assistant","content":[
@@ -204,11 +205,12 @@ func TestGeminiMessagesParityCallSignatureLift(t *testing.T) {
 	want := gmParityDecode(t, `{"contents":[
 	    {"role":"user","parts":[{"text":"q"}]},
 	    {"role":"model","parts":[{"text":"why","thought":true,"thoughtSignature":"TSIG"},
-	      {"function_call":{"name":"f","args":{"a":1}},"thoughtSignature":"TSIG"}]}],
+	      {"function_call":{"name":"f","args":{"a":1}},"thoughtSignature":"skip_thought_signature_validator"}]}],
 	  "generationConfig":{"max_output_tokens":8}}`)
-	gmParityEqual(t, got, want, "turn signature lift")
+	gmParityEqual(t, got, want, "unsigned call takes the skip marker")
 
-	// The call's own provider-field signature outranks the turn's.
+	// The call's own provider-field signature rides verbatim — the skip
+	// marker is the fallback, not the default.
 	got = gmParityFold(t, `{"model":"m","max_tokens":8,"messages":[
 	    {"role":"user","content":"q"},
 	    {"role":"assistant","content":[
@@ -220,19 +222,7 @@ func TestGeminiMessagesParityCallSignatureLift(t *testing.T) {
 	    {"role":"model","parts":[{"text":"why","thought":true,"thoughtSignature":"TSIG"},
 	      {"function_call":{"name":"f","args":{}},"thoughtSignature":"CSIG"}]}],
 	  "generationConfig":{"max_output_tokens":8}}`)
-	gmParityEqual(t, got, want, "call signature wins")
-
-	// Nothing anywhere: the call stays unsigned — the fold has no signature
-	// to invent.
-	got = gmParityFold(t, `{"model":"m","max_tokens":8,"messages":[
-	    {"role":"user","content":"q"},
-	    {"role":"assistant","content":[
-	      {"type":"tool_use","id":"t1","name":"f","input":{}}]}]}`)
-	want = gmParityDecode(t, `{"contents":[
-	    {"role":"user","parts":[{"text":"q"}]},
-	    {"role":"model","parts":[{"function_call":{"name":"f","args":{}}}]}],
-	  "generationConfig":{"max_output_tokens":8}}`)
-	gmParityEqual(t, got, want, "no signature to lift")
+	gmParityEqual(t, got, want, "call signature rides verbatim")
 }
 
 // The output_format schema strictifies the way the bridge's strict mode does
@@ -424,7 +414,7 @@ func TestGeminiMessagesParityRequestParamFates(t *testing.T) {
 func TestGeminiMessagesParityReverseFullBody(t *testing.T) {
 	got := gmParityFoldBack(t, `{"contents":[
 	    {"role":"user","parts":[{"text":"hi"},{"inline_data":{"data":"AAAB","mime_type":"image/png"}}]},
-	    {"role":"model","parts":[{"text":"answer"},{"function_call":{"name":"f","args":{"a":1}}}]},
+	    {"role":"model","parts":[{"text":"answer"},{"function_call":{"name":"f","args":{"a":1}},"thoughtSignature":"skip_thought_signature_validator"}]},
 	    {"role":"user","parts":[{"function_response":{"name":"f","response":{"content":"res"}}}]}],
 	  "system_instruction":{"parts":[{"text":"be brief"}]},
 	  "tools":[{"function_declarations":[{"name":"f","description":"d",
@@ -460,7 +450,7 @@ func TestGeminiMessagesParityReverseFullBody(t *testing.T) {
 func TestGeminiMessagesParityReverseRoundTrip(t *testing.T) {
 	src := `{"contents":[
 	    {"role":"user","parts":[{"text":"hi"},{"inline_data":{"data":"AAAB","mime_type":"image/png"}}]},
-	    {"role":"model","parts":[{"text":"answer"},{"function_call":{"name":"f","args":{"a":1}}}]},
+	    {"role":"model","parts":[{"text":"answer"},{"function_call":{"name":"f","args":{"a":1}},"thoughtSignature":"skip_thought_signature_validator"}]},
 	    {"role":"user","parts":[{"function_response":{"name":"f","response":{"content":"res"}}}]}],
 	  "system_instruction":{"parts":[{"text":"be brief"}]},
 	  "tools":[{"function_declarations":[{"name":"f","description":"d",
@@ -484,7 +474,7 @@ func TestGeminiMessagesParityReverseRoundTrip(t *testing.T) {
 	}
 	want := gmParityDecode(t, `{"contents":[
 	    {"role":"user","parts":[{"text":"hi"},{"inline_data":{"data":"AAAB","mime_type":"image/png"}}]},
-	    {"role":"model","parts":[{"text":"answer"},{"function_call":{"name":"f","args":{"a":1}}}]},
+	    {"role":"model","parts":[{"text":"answer"},{"function_call":{"name":"f","args":{"a":1}},"thoughtSignature":"skip_thought_signature_validator"}]},
 	    {"role":"user","parts":[{"function_response":{"name":"f","response":{"content":"res"}}}]}],
 	  "system_instruction":{"parts":[{"text":"be brief"}]},
 	  "tools":[{"function_declarations":[{"name":"f","description":"d",
@@ -873,7 +863,7 @@ func TestGeminiMessagesParityReverseModelRunsMerge(t *testing.T) {
 	got := gmParityFoldBack(t, `{"contents":[
 	    {"role":"user","parts":[{"text":"q"}]},
 	    {"role":"model","parts":[{"text":"partial"}]},
-	    {"role":"model","parts":[{"function_call":{"name":"f","args":{}}}]},
+	    {"role":"model","parts":[{"function_call":{"name":"f","args":{}},"thoughtSignature":"skip_thought_signature_validator"}]},
 	    {"role":"user","parts":[{"function_response":{"name":"f","response":{"content":"r"}}}]}],
 	  "generationConfig":{"max_output_tokens":16}}`, 64)
 	want := gmParityDecode(t, `{"messages":[

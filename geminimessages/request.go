@@ -424,21 +424,6 @@ func assistantFoldEntry(m map[string]any) (foldEntry, bool) {
 		parts = append(parts, map[string]any{"text": stringContent})
 	}
 	calls := map[string]string{}
-	// The signature a call part needs when the tool_use block carried none:
-	// the turn's own thinking-block signature. The target rejects a replayed
-	// functionCall part without a thoughtSignature (INVALID_ARGUMENT, verified
-	// against the live upstream), and a Messages client that round-trips
-	// thinking blocks but drops the tool_use's provider_specific_fields — the
-	// common client behavior this fold was measured against — still carries
-	// the turn's reasoning signature, so lifting it onto the call is the one
-	// spelling that keeps the replay valid.
-	turnSig := ""
-	for i := len(thinks) - 1; i >= 0; i-- {
-		if thinks[i].sig != "" {
-			turnSig = thinks[i].sig
-			break
-		}
-	}
 	for _, u := range uses {
 		if u.id == "" {
 			continue
@@ -449,11 +434,19 @@ func assistantFoldEntry(m map[string]any) (foldEntry, bool) {
 			part["function_call"].(map[string]any)["args"] = u.args
 		}
 		if u.sig == "" {
-			u.sig = turnSig
+			// The target rejects a replayed functionCall part without a
+			// thoughtSignature (INVALID_ARGUMENT, verified against the live
+			// upstream), and it VALIDATES the value: a real signature from
+			// another part of the turn does not clear it, only the call's own
+			// does. A client that dropped the tool_use's
+			// provider_specific_fields (the common client behavior this fold
+			// was measured against) has nothing valid left to send, so the
+			// part carries the upstream's own skip marker — the sentinel it
+			// accepts in place of a signature — rather than a turn that
+			// cannot be replayed at all.
+			u.sig = skipThoughtSignature
 		}
-		if u.sig != "" {
-			part["thoughtSignature"] = u.sig
-		}
+		part["thoughtSignature"] = u.sig
 		// The reference skips a call whose name and arguments it has already
 		// emitted in this turn: a client reading the parts would otherwise
 		// count one call twice.
@@ -1576,3 +1569,8 @@ func serviceTierFromGemini(s string) string {
 		return s
 	}
 }
+
+// skipThoughtSignature is the marker the upstream's own validator accepts in
+// place of a thought signature a client could not preserve — the spelling the
+// official hub client sends for a replayed call whose signature it never saw.
+const skipThoughtSignature = "skip_thought_signature_validator"

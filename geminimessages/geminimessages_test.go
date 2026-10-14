@@ -106,7 +106,7 @@ func TestMessagesToGeminiSpecSample(t *testing.T) {
 	want := decode(t, `{
 	  "contents":[
 	    {"role":"user","parts":[{"text":"hello"}]},
-	    {"role":"model","parts":[{"text":"hi"},{"function_call":{"name":"lookup","args":{"q":"x"}}}]},
+	    {"role":"model","parts":[{"text":"hi"},{"function_call":{"name":"lookup","args":{"q":"x"}},"thoughtSignature":"skip_thought_signature_validator"}]},
 	    {"role":"user","parts":[{"function_response":{"name":"lookup","response":{"content":"res"}}}]}],
 	  "system_instruction":{"parts":[{"text":"be brief"}]},
 	  "tools":[{"function_declarations":[{"name":"lookup","description":"d",
