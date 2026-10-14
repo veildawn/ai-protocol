@@ -643,16 +643,16 @@ func assistantMessageParts(m map[string]any) (parts []any, carriesCalls bool, er
 // thinkingBlockPart renders one signed thinking block. The reference first
 // tries to read the block's text as a JSON object and spread its keys onto the
 // part; only when the text is not an object does it send the text verbatim.
+// thinkingBlockPart builds the part a signed thinking block becomes: a
+// thought part carrying the signature itself, so the reverse fold can read
+// the signature back off it. (The reference's encoding — a plain text part
+// with the signature beside it — loses the signature on the way back, since
+// the chat wire's reverse reads signatures only off thought parts, and a
+// block whose text parses as a JSON object used to be spread as part keys;
+// both dropped in this fold's audit.)
 func thinkingBlockPart(text, sig string) map[string]any {
-	if parsed, ok := parseJSONObject(text); ok {
-		out := make(map[string]any, len(parsed)+1)
-		for k, v := range parsed {
-			out[k] = deepCopy(v)
-		}
-		out["thoughtSignature"] = sig
-		return out
-	}
-	return map[string]any{"thoughtSignature": sig, "text": text}
+	part := map[string]any{"thought": true, "text": text, "thoughtSignature": sig}
+	return part
 }
 
 // assistantTextSignature reads the signature a replay attaches to the turn's
@@ -984,15 +984,6 @@ func parseJSONValue(s string) (any, error) {
 		return nil, err
 	}
 	return v, nil
-}
-
-func parseJSONObject(s string) (map[string]any, bool) {
-	v, err := parseJSONValue(s)
-	if err != nil {
-		return nil, false
-	}
-	m, ok := v.(map[string]any)
-	return m, ok
 }
 
 // chatToolsToWire folds the tools list (and the legacy functions list) plus

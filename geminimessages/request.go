@@ -340,8 +340,18 @@ func truncateForError(s string) string {
 }
 
 // assistantFoldEntry folds one assistant turn. The part order is the
-// reference's own: the reasoning text as a thought part, each signed thinking
-// block as a signature-carrying part, the turn's text, then the calls.
+// reference's own: each thinking block as a thought part, the turn's text,
+// then the calls.
+//
+// The thought part carries its block's signature itself. This deviates from
+// the reference's encoding, which writes the reasoning TWICE — one merged
+// thought part plus a plain-text part per block carrying the signature — a
+// shape this audit kept until it was measured against the live upstream:
+// every replayed turn bills its reasoning text twice, and a signature on a
+// plain text part has no spelling on the way back (the reverse fold drops
+// it), so the duplicate part bought nothing. On the thought part the
+// signature round-trips: the reverse fold reads it back into the thinking
+// block it came from.
 func assistantFoldEntry(m map[string]any) (foldEntry, bool) {
 	var textBlocks []string
 	hasStringContent := false
@@ -401,17 +411,12 @@ func assistantFoldEntry(m map[string]any) (foldEntry, bool) {
 	}
 
 	var parts []any
-	var reasoning []string
 	for _, t := range thinks {
-		if t.text != "" {
-			reasoning = append(reasoning, t.text)
+		part := map[string]any{"thought": true, "text": t.text}
+		if t.sig != "" {
+			part["thoughtSignature"] = t.sig
 		}
-	}
-	if len(reasoning) > 0 {
-		parts = append(parts, map[string]any{"thought": true, "text": strings.Join(reasoning, "\n")})
-	}
-	for _, t := range thinks {
-		parts = append(parts, signedThoughtPart(t.text, t.sig))
+		parts = append(parts, part)
 	}
 	if len(textBlocks) > 0 {
 		parts = append(parts, map[string]any{"text": joined})
@@ -465,26 +470,6 @@ func toolUseSignature(bm map[string]any) string {
 		return ""
 	}
 	return jsonx.GetString(psf, "signature")
-}
-
-// signedThoughtPart builds the part a signed thinking block becomes: the
-// reference parses the block's text as JSON and spreads it as the part (a
-// JSON object spells its own keys), falling back to the text when it is not
-// one. The signature is written even when empty — the block said "signed
-// here", and dropping the key would change what a replay sees.
-func signedThoughtPart(text, sig string) map[string]any {
-	dec := json.NewDecoder(strings.NewReader(text))
-	dec.UseNumber()
-	var parsed any
-	if err := dec.Decode(&parsed); err == nil {
-		if pm, ok := parsed.(map[string]any); ok {
-			if _, clash := pm["thoughtSignature"]; !clash {
-				pm["thoughtSignature"] = sig
-				return pm
-			}
-		}
-	}
-	return map[string]any{"text": text, "thoughtSignature": sig}
 }
 
 // partExistsIgnoringSignature reports whether an equivalent part is already in
@@ -1376,7 +1361,15 @@ func geminiPartToBlocks(pm map[string]any, lastNameID map[string]string, callCou
 				// empty thinking block outright.
 				return nil
 			}
-			return []any{map[string]any{"type": "thinking", "thinking": thinking, "signature": sig}}
+			// The signature key rides only a real signature: an absent one
+			// folds back to a block with no signature field, the shape the
+			// block arrived in, rather than an explicit empty string the next
+			// forward fold would have to special-case.
+			block := map[string]any{"type": "thinking", "thinking": thinking}
+			if sig != "" {
+				block["signature"] = sig
+			}
+			return []any{block}
 		}
 		// A signature on a plain text part has no Messages spelling — the
 		// forward fold reads it, but the Messages wire cannot carry it back.

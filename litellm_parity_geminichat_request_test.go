@@ -133,10 +133,13 @@ func TestGeminiChatParityChatToGeminiRequest(t *testing.T) {
 		// reasoning_content -> thought part (transformation.py:880-883).
 		{"assistant reasoning", `{"messages":[{"role":"user","content":"q"},{"role":"assistant","content":"a","reasoning_content":"why"}]}`,
 			`{"contents":[{"role":"user","parts":[{"text":"q"}]},{"role":"model","parts":[{"text":"why","thought":true},{"text":"a"}]}]}`},
-		// Signed thinking block -> {thoughtSignature, text}; unsigned and
-		// redacted blocks drop (transformation.py:884-901).
+		// Signed thinking block -> a thought part carrying the signature
+		// itself (deliberate deviation from transformation.py:884-901, whose
+		// plain-text signature carrier loses the signature on the way back —
+		// the chat reverse reads signatures only off thought parts); unsigned
+		// and redacted blocks still drop.
 		{"assistant thinking blocks", `{"messages":[{"role":"user","content":"q"},{"role":"assistant","content":"a","thinking_blocks":[{"type":"thinking","thinking":"signed","signature":"SIG"},{"type":"thinking","thinking":"unsigned"},{"type":"redacted_thinking","data":"xx"}]}]}`,
-			`{"contents":[{"role":"user","parts":[{"text":"q"}]},{"role":"model","parts":[{"text":"signed","thoughtSignature":"SIG"},{"text":"a"}]}]}`},
+			`{"contents":[{"role":"user","parts":[{"text":"q"}]},{"role":"model","parts":[{"text":"signed","thought":true,"thoughtSignature":"SIG"},{"text":"a"}]}]}`},
 		// Assistant list content keeps only text parts (transformation.py:904-912).
 		{"assistant list text only", `{"messages":[{"role":"user","content":"q"},{"role":"assistant","content":[{"type":"text","text":"t1"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AA"}},{"type":"text","text":"t2"}]}]}`,
 			`{"contents":[{"role":"user","parts":[{"text":"q"}]},{"role":"model","parts":[{"text":"t1"},{"text":"t2"}]}]}`},
@@ -592,8 +595,13 @@ func TestGeminiChatParityRequestRoundTripDocumentedLosses(t *testing.T) {
 		t.Fatalf("the wire's own call id was dropped before the forward fold could lose it: %s", chat.Body)
 	}
 
-	// The signed thought part: the composition duplicates it, exactly as the
-	// reference's two-hop does.
+	// The signed thought part survives the composition with its signature:
+	// the forward fold keeps the signature on the thought part (this fold's
+	// deviation from the reference), and the residual second thought part
+	// comes from the reverse's reasoning_content + thinking_blocks split —
+	// the reverse answers a chat READER (reasoning_content is what it
+	// displays), so both fields deliberately carry the text; only the
+	// thinking_blocks copy rides the next forward fold signed.
 	signed := `{"contents":[{"role":"user","parts":[{"text":"q"}]},{"role":"model","parts":[{"text":"why","thought":true,"thoughtSignature":"SIG"}]}]}`
 	chat, err = ConvertRequest(Gemini, Chat, []byte(signed))
 	if err != nil {
@@ -603,9 +611,9 @@ func TestGeminiChatParityRequestRoundTripDocumentedLosses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"contents":[{"role":"user","parts":[{"text":"q"}]},{"role":"model","parts":[{"text":"why","thought":true},{"text":"why","thoughtSignature":"SIG"}]}]}`
+	want := `{"contents":[{"role":"user","parts":[{"text":"q"}]},{"role":"model","parts":[{"text":"why","thought":true},{"text":"why","thought":true,"thoughtSignature":"SIG"}]}]}`
 	if g, w := geminiChatCanonical(t, string(back.Body)), geminiChatCanonical(t, want); g != w {
-		t.Fatalf("signed thought round trip\n got  %s\n want %s (the documented duplication)", g, w)
+		t.Fatalf("signed thought round trip\n got  %s\n want %s (reasoning for the reader, signed block for the replay)", g, w)
 	}
 }
 

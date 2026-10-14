@@ -150,12 +150,17 @@ func TestGeminiMessagesParityRequestToolChoiceModes(t *testing.T) {
 	}
 }
 
-// A signed thinking block rides as BOTH a thought part and a signature part
-// carrying the same text: the reference's bridge turns the block into
-// reasoning_content plus thinking_blocks, and the gemini fold writes one part
-// for each (litellm: transformation.py request fold of reasoning_content at
-// :880-883 and thinking_blocks at :884-901 — the two-part duplication is the
-// reference's real output, printed this audit).
+// A thinking block folds to ONE thought part carrying its signature itself.
+// This deliberately deviates from the reference's bridge, which turns the
+// block into reasoning_content plus thinking_blocks and writes one gemini
+// part for each (litellm: transformation.py request fold of reasoning_content
+// at :880-883 and thinking_blocks at :884-901 — the two-part duplication is
+// the reference's real output, printed this audit). The duplication was
+// measured against the live upstream and dropped: every replayed turn bills
+// its reasoning text twice, and the reference's signature carrier — a plain
+// text part — loses the signature on the way back (the reverse fold reads
+// signatures only off thought parts). On the thought part the signature
+// round-trips.
 func TestGeminiMessagesParityRequestThinkingBlocks(t *testing.T) {
 	got := gmParityFold(t, `{"model":"m","max_tokens":8,"messages":[
 	    {"role":"user","content":"q"},
@@ -164,10 +169,24 @@ func TestGeminiMessagesParityRequestThinkingBlocks(t *testing.T) {
 	      {"type":"text","text":"answer"}]}]}`)
 	want := gmParityDecode(t, `{"contents":[
 	    {"role":"user","parts":[{"text":"q"}]},
-	    {"role":"model","parts":[{"text":"why","thought":true},
-	      {"text":"why","thoughtSignature":"SIG"},{"text":"answer"}]}],
+	    {"role":"model","parts":[{"text":"why","thought":true,"thoughtSignature":"SIG"},
+	      {"text":"answer"}]}],
 	  "generationConfig":{"max_output_tokens":8}}`)
 	gmParityEqual(t, got, want, "thinking block fold")
+
+	// An unsigned block folds to a bare thought part — no empty
+	// thoughtSignature key, no duplicate text part.
+	got = gmParityFold(t, `{"model":"m","max_tokens":8,"messages":[
+	    {"role":"user","content":"q"},
+	    {"role":"assistant","content":[
+	      {"type":"thinking","thinking":"why"},
+	      {"type":"text","text":"answer"}]}]}`)
+	want = gmParityDecode(t, `{"contents":[
+	    {"role":"user","parts":[{"text":"q"}]},
+	    {"role":"model","parts":[{"text":"why","thought":true},
+	      {"text":"answer"}]}],
+	  "generationConfig":{"max_output_tokens":8}}`)
+	gmParityEqual(t, got, want, "unsigned thinking block fold")
 }
 
 // The output_format schema strictifies the way the bridge's strict mode does
@@ -455,13 +474,13 @@ func gmParityRefold(t *testing.T, body map[string]any) map[string]any {
 }
 
 // A thought part takes the §3.1 shape: a thinking block whose signature is
-// the part's own ("" when it carried none), and the signature on a plain text
-// part has no Messages spelling and drops. The roundtrip through the
-// reference is lossy BY THE REFERENCE'S OWN FORWARD: it prints any thinking
-// block as a thought part PLUS a signature part (proven this audit — the
-// unsigned block {thinking:"why"} refolds to [{"text":"why","thought":true},
-// {"text":"why","thoughtSignature":""}]), so the signature-part duplication
-// below is the reference's encoding, not a codec invention.
+// the part's own, and the signature on a plain text part has no Messages
+// spelling and drops. An unsigned thought part folds back to a thinking block
+// with NO signature key (the forward fold writes the key only for a real
+// signature), so the fold pair is lossless in both directions — the
+// reference's own forward used to print any thinking block as a thought part
+// PLUS a signature part (proven this audit), duplicating the reasoning text
+// on every replay; this fold dropped that duplication.
 func TestGeminiMessagesParityReverseThoughtParts(t *testing.T) {
 	got := gmParityFoldBack(t, `{"contents":[
 	    {"role":"user","parts":[{"text":"q"}]},
@@ -472,8 +491,11 @@ func TestGeminiMessagesParityReverseThoughtParts(t *testing.T) {
 		t.Fatalf("blocks = %#v, want thinking then text", blocks)
 	}
 	th := blocks[0].(map[string]any)
-	if th["type"] != "thinking" || th["thinking"] != "why" || th["signature"] != "" {
+	if th["type"] != "thinking" || th["thinking"] != "why" {
 		t.Fatalf("thinking block = %#v", th)
+	}
+	if _, has := th["signature"]; has {
+		t.Fatalf("unsigned thought part grew a signature key: %#v", th)
 	}
 	if blocks[1].(map[string]any)["text"] != "answer" {
 		t.Fatalf("text block = %#v", blocks[1])
@@ -491,18 +513,27 @@ func TestGeminiMessagesParityReverseThoughtParts(t *testing.T) {
 		t.Fatalf("text block grew a signature: %#v", blocks[0])
 	}
 
-	// The full roundtrip of a thought part, pinned to the reference's print
-	// (this audit): the refold duplicates the thought as a signature part with
-	// an empty signature — the reference's own unsigned-thinking encoding.
+	// The full roundtrip of a thought part: the refold returns the same
+	// single thought part, signature and all — the compact encoding the
+	// forward fold now writes.
 	refolded := gmParityRefold(t, gmParityFoldBack(t, `{"contents":[
 	    {"role":"user","parts":[{"text":"q"}]},
 	    {"role":"model","parts":[{"text":"why","thought":true},{"text":"answer"}]}]}`, 64))
 	want := gmParityDecode(t, `{"contents":[
 	    {"role":"user","parts":[{"text":"q"}]},
-	    {"role":"model","parts":[{"text":"why","thought":true},
-	      {"text":"why","thoughtSignature":""},{"text":"answer"}]}],
+	    {"role":"model","parts":[{"text":"why","thought":true},{"text":"answer"}]}],
 	  "generationConfig":{"max_output_tokens":64}}`)
 	gmParityEqual(t, refolded, want, "thought roundtrip")
+
+	// A signed thought part round-trips its signature onto the same part.
+	refolded = gmParityRefold(t, gmParityFoldBack(t, `{"contents":[
+	    {"role":"user","parts":[{"text":"q"}]},
+	    {"role":"model","parts":[{"text":"why","thought":true,"thoughtSignature":"SIG"},{"text":"answer"}]}]}`, 64))
+	want = gmParityDecode(t, `{"contents":[
+	    {"role":"user","parts":[{"text":"q"}]},
+	    {"role":"model","parts":[{"text":"why","thought":true,"thoughtSignature":"SIG"},{"text":"answer"}]}],
+	  "generationConfig":{"max_output_tokens":64}}`)
+	gmParityEqual(t, refolded, want, "signed thought roundtrip")
 }
 
 // top_k, seed and the penalty controls ride INTO the Messages body: the
