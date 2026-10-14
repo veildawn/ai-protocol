@@ -772,14 +772,16 @@ func TestResponsesToMessagesDropsCustomToolCalls(t *testing.T) {
 	}
 }
 
-// On this fold the reference's chat→responses bridge announces the REASONING
-// item off the first thinking delta (streaming_iterator.py:817
-// _ensure_output_item_for_chunk — the message item of a reasoning-first stream
-// is never announced), then closes the reasoning stretch with its done trio at
-// the first following chunk (streaming_iterator.py:926: summary text done,
-// summary part done, reasoning item done). What it never emits is the
-// reasoning part's .added — the part is only ever closed — and the opaque
-// payload only ever rides the completed snapshot.
+// On this fold the reasoning item announces itself off the first thinking
+// delta, and the message item announces itself at the first text that follows
+// — each at its own output_index, whenever it opens (the reference's bridge
+// announces only the reasoning item there, leaving the message item's text
+// deltas addressing an item no output_item.added had declared; this library
+// declines to keep that). An active reasoning stretch still closes with its
+// done trio at the first following chunk (streaming_iterator.py:926: summary
+// text done, summary part done, reasoning item done). What the fold never
+// emits is the reasoning part's .added — the part is only ever closed — and
+// the opaque payload only ever rides the completed snapshot.
 func TestMessagesToResponsesReasoningHasNoLifecycleEvents(t *testing.T) {
 	src := strings.Join([]string{
 		`event: message_start`,
@@ -819,11 +821,17 @@ func TestMessagesToResponsesReasoningHasNoLifecycleEvents(t *testing.T) {
 	}
 	evs := respEvents(t, dst.String())
 	added := eventsOfTypes(t, evs, "response.output_item.added")
-	if len(added) != 1 {
-		t.Fatalf("output_item.added count=%d, want the single reasoning item:\n%s", len(added), dst.String())
+	if len(added) != 2 {
+		t.Fatalf("output_item.added count=%d, want the reasoning item then the message item:\n%s", len(added), dst.String())
 	}
 	if item, _ := added[0]["item"].(map[string]any); item["type"] != "reasoning" {
-		t.Fatalf("added item = %#v, want reasoning", item)
+		t.Fatalf("first added item = %#v, want reasoning", item)
+	}
+	if item, _ := added[1]["item"].(map[string]any); item["type"] != "message" {
+		t.Fatalf("second added item = %#v, want the message item the text rides", item)
+	}
+	if added[0]["output_index"] != float64(0) || added[1]["output_index"] != float64(1) {
+		t.Fatalf("added indexes = %v/%v, want 0/1 in open order", added[0]["output_index"], added[1]["output_index"])
 	}
 	// The done trio closes the reasoning stretch, mid-stream, right before the
 	// text delta that ended it.
@@ -882,9 +890,8 @@ func TestMessagesToResponsesContentPartAddedHasAnnotations(t *testing.T) {
 }
 
 // A tool item is announced under its call id (never a self-made fc_ id), at
-// output_index from 1 (0 is the merged message/reasoning item), and its
-// arguments deltas are re-chunked to the ~10-character pieces the reference
-// streams.
+// the output_index it took when it opened, and its arguments deltas are
+// re-chunked to the ~10-character pieces the reference streams.
 func TestMessagesToResponsesToolItemIdentityAndChunking(t *testing.T) {
 	src := strings.Join([]string{
 		`event: message_start`,
@@ -922,8 +929,8 @@ func TestMessagesToResponsesToolItemIdentityAndChunking(t *testing.T) {
 	if toolAdded == nil {
 		t.Fatalf("tool item never announced:\n%s", dst.String())
 	}
-	if toolAdded["output_index"] != float64(1) {
-		t.Fatalf("tool output_index = %#v, want 1", toolAdded["output_index"])
+	if toolAdded["output_index"] != float64(0) {
+		t.Fatalf("tool output_index = %#v, want 0 (the call opened first on this stream)", toolAdded["output_index"])
 	}
 	item, _ := toolAdded["item"].(map[string]any)
 	if item["id"] != "toolu_1" || item["call_id"] != "toolu_1" || item["name"] != "exec" || item["status"] != "in_progress" {
@@ -932,7 +939,7 @@ func TestMessagesToResponsesToolItemIdentityAndChunking(t *testing.T) {
 	var pieces []string
 	for _, e := range evs {
 		if e["type"] == "response.function_call_arguments.delta" {
-			if e["item_id"] != "toolu_1" || e["output_index"] != float64(1) {
+			if e["item_id"] != "toolu_1" || e["output_index"] != float64(0) {
 				t.Fatalf("delta = %#v", e)
 			}
 			pieces = append(pieces, e["delta"].(string))

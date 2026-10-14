@@ -437,15 +437,17 @@ func TestChatResponseToResponsesToolOnlyKeepsMessageItem(t *testing.T) {
 	}
 }
 
-// The streaming bridge shares output_index 0 between the text items: whichever
-// of reasoning/message opens first owns the slot's single output_item.added,
-// the second rides it with no added frame of its own, and no part.added exists
-// for a reasoning item; tool calls count from 1 with the chat call id as the
-// item id, and an argument fragment is re-sliced into ~10-character deltas
-// whose concatenation is the arguments unchanged. (The reference drops the
-// first reasoning delta to its one-shot queueing; this library keeps every
-// delta — the completed text is the same and no content is lost mid-stream.)
-func TestPipeChatToResponsesSharedTextSlotAndToolCallIndexes(t *testing.T) {
+// Every item takes its own output_index and is announced when it opens, in
+// open order — the shape the Responses wire itself uses. The reference's
+// bridge instead shares output_index 0 between the text items with a single
+// one-shot announcement (the second text kind rides the slot with no added
+// frame of its own), which left the message item's text deltas addressing an
+// item no output_item.added had declared; this library announces each item it
+// opens. No part.added exists for a reasoning item; tool calls take the next
+// index with the chat call id as the item id, and an argument fragment is
+// re-sliced into ~10-character deltas whose concatenation is the arguments
+// unchanged.
+func TestPipeChatToResponsesAnnouncesEachItemInOpenOrder(t *testing.T) {
 	longArgs := `{"q":"abcdefghijklmnopqrstuvwxyz0123"}` // 38 chars
 	argsJSON, err := json.Marshal(longArgs)
 	if err != nil {
@@ -487,8 +489,8 @@ func TestPipeChatToResponsesSharedTextSlotAndToolCallIndexes(t *testing.T) {
 			added = append(added, e)
 		}
 	}
-	if len(added) != 2 {
-		t.Fatalf("output_item.added count = %d, want 2 (reasoning owns slot 0, message never opens):\n%s", len(added), dst.String())
+	if len(added) != 3 {
+		t.Fatalf("output_item.added count = %d, want 3 (reasoning, message, function_call):\n%s", len(added), dst.String())
 	}
 	if got := added[0]["output_index"]; got != float64(0) {
 		t.Fatalf("first added output_index = %v, want 0", got)
@@ -497,26 +499,37 @@ func TestPipeChatToResponsesSharedTextSlotAndToolCallIndexes(t *testing.T) {
 		t.Fatalf("first added item = %#v, want reasoning", it)
 	}
 	if got := added[1]["output_index"]; got != float64(1) {
-		t.Fatalf("function_call added output_index = %v, want 1 (slot 0 is reserved for the text item)", got)
+		t.Fatalf("message added output_index = %v, want 1", got)
 	}
-	fcItem := added[1]["item"].(map[string]any)
+	if it := added[1]["item"].(map[string]any); it["type"] != "message" {
+		t.Fatalf("second added item = %#v, want the message item", it)
+	}
+	if got := added[2]["output_index"]; got != float64(2) {
+		t.Fatalf("function_call added output_index = %v, want 2", got)
+	}
+	fcItem := added[2]["item"].(map[string]any)
 	if fcItem["type"] != "function_call" || fcItem["id"] != "call_1" || fcItem["call_id"] != "call_1" {
 		t.Fatalf("function_call added item = %#v, want the chat call id as id and call_id", fcItem)
 	}
-	for _, partAdded := range []string{"response.content_part.added", "response.reasoning_summary_part.added"} {
-		for _, e := range evs {
-			if e["type"] == partAdded {
-				t.Fatalf("%s emitted; the reference opens no part frame for a slot the reasoning item owns", partAdded)
-			}
+	partAdded := 0
+	for _, e := range evs {
+		switch e["type"] {
+		case "response.content_part.added":
+			partAdded++
+		case "response.reasoning_summary_part.added":
+			t.Fatalf("response.reasoning_summary_part.added emitted; a reasoning item opens no part frame")
 		}
+	}
+	if partAdded != 1 {
+		t.Fatalf("content_part.added count = %d, want exactly the message item's", partAdded)
 	}
 	var deltas []string
 	for _, e := range evs {
 		switch e["type"] {
 		case "response.function_call_arguments.delta":
 			deltas = append(deltas, e["delta"].(string))
-			if e["item_id"] != "call_1" || e["output_index"] != float64(1) {
-				t.Fatalf("args delta = %#v, want item_id call_1 at output_index 1", e)
+			if e["item_id"] != "call_1" || e["output_index"] != float64(2) {
+				t.Fatalf("args delta = %#v, want item_id call_1 at output_index 2", e)
 			}
 		}
 	}
@@ -528,12 +541,12 @@ func TestPipeChatToResponsesSharedTextSlotAndToolCallIndexes(t *testing.T) {
 			t.Fatalf("args delta %d length = %d, want %d (deltas %v)", i, len(deltas[i]), want, deltas)
 		}
 	}
-	// The message rides slot 0 unopened but still streams and closes.
+	// The message streams and closes on its own announced item.
 	var textDeltas, msgDones int
 	for _, e := range evs {
 		if e["type"] == "response.output_text.delta" {
-			if e["output_index"] != float64(0) {
-				t.Fatalf("text delta output_index = %v, want the shared slot 0", e["output_index"])
+			if e["output_index"] != float64(1) {
+				t.Fatalf("text delta output_index = %v, want the message item's own slot", e["output_index"])
 			}
 			textDeltas++
 		}
@@ -544,15 +557,14 @@ func TestPipeChatToResponsesSharedTextSlotAndToolCallIndexes(t *testing.T) {
 		}
 	}
 	if textDeltas != 1 || msgDones != 1 {
-		t.Fatalf("text deltas = %d, message item dones = %d, want the message to stream and close on slot 0", textDeltas, msgDones)
+		t.Fatalf("text deltas = %d, message item dones = %d, want the message to stream and close on its own item", textDeltas, msgDones)
 	}
 }
 
-// A tool-first chunk burns the shared text slot's opening frame without
-// emitting it — late text rides slot 0 unopened (deltas and close frames, no
-// output_item.added / content_part.added), exactly as the reference's one-shot
-// gate behaves.
-func TestPipeChatToResponsesToolFirstBurnsTextSlot(t *testing.T) {
+// A tool-first chunk announces the call at its own index, and text that
+// arrives after it opens and announces the message item — the late text rides
+// an item the client has seen declared, never the reference's burned slot.
+func TestPipeChatToResponsesToolFirstAnnouncesLateText(t *testing.T) {
 	src := strings.Join([]string{
 		`data: {"id":"c1","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"}}]}}]}`,
 		``,
@@ -580,30 +592,30 @@ func TestPipeChatToResponsesToolFirstBurnsTextSlot(t *testing.T) {
 		}
 	}
 	var addedTypes []string
-	textDelta, textDone := false, false
+	msgAnnounced, partAdded, textDelta, textDone := false, false, false, false
 	for _, e := range evs {
 		switch e["type"] {
 		case "response.output_item.added":
 			addedTypes = append(addedTypes, e["item"].(map[string]any)["type"].(string))
-			if e["output_index"] != float64(1) {
-				t.Fatalf("function_call added output_index = %v, want 1", e["output_index"])
+			if e["output_index"] != float64(len(addedTypes)-1) {
+				t.Fatalf("output_item.added indexes must count up in open order, got %v at position %d", e["output_index"], len(addedTypes)-1)
 			}
+			if it := e["item"].(map[string]any); it["type"] == "message" {
+				msgAnnounced = true
+			}
+		case "response.content_part.added":
+			partAdded = true
 		case "response.output_text.delta":
 			textDelta = true
-			if e["output_index"] != float64(0) {
-				t.Fatalf("late text delta output_index = %v, want slot 0", e["output_index"])
-			}
 		case "response.output_text.done":
 			textDone = true
-		case "response.content_part.added":
-			t.Fatalf("content_part.added emitted for a slot a tool call burned:\n%s", dst.String())
 		}
 	}
-	if len(addedTypes) != 1 || addedTypes[0] != "function_call" {
-		t.Fatalf("added items = %v, want only the function_call", addedTypes)
+	if len(addedTypes) != 2 || addedTypes[0] != "function_call" || addedTypes[1] != "message" {
+		t.Fatalf("added items = %v, want the function_call then the message", addedTypes)
 	}
-	if !textDelta || !textDone {
-		t.Fatalf("late text must still stream and close on slot 0 (delta=%v done=%v):\n%s", textDelta, textDone, dst.String())
+	if !msgAnnounced || !partAdded || !textDelta || !textDone {
+		t.Fatalf("late text must open and announce its own item (msg added=%v part=%v delta=%v done=%v):\n%s", msgAnnounced, partAdded, textDelta, textDone, dst.String())
 	}
 }
 

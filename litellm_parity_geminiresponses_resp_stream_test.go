@@ -631,11 +631,13 @@ func gemRespParityFrames(t *testing.T, out string) []map[string]any {
 	return frames
 }
 
-// The full event walk for a reasoned tool turn: created, in_progress, the one
-// index-0 announcement (a reasoning frame announces the reasoning item), the
-// text delta under a silently-minted message id, the tool from index 1, and
-// the close order tools-then-text (reference st_text_tool run;
-// streaming_iterator.py:118 for the index split).
+// The full event walk for a reasoned tool turn: created, in_progress, the
+// reasoning item announced at its own index with its delta, the message item
+// announced when its text arrives, the tool after them, and the close order
+// tools-then-text. (The reference's bridge announces only the first content
+// item and swallows that frame's own delta — the message item of this shape
+// streamed its text under a silently-minted id; this library announces every
+// item and keeps every delta.)
 func TestPipeGeminiToResponsesParityTextTool(t *testing.T) {
 	src := strings.Join([]string{
 		`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"think","thought":true}]},"index":0}],"responseId":"r1"}`,
@@ -655,6 +657,9 @@ func TestPipeGeminiToResponsesParityTextTool(t *testing.T) {
 	want := []string{
 		"response.created", "response.in_progress",
 		"response.output_item.added",
+		"response.reasoning_summary_text.delta",
+		"response.output_item.added",
+		"response.content_part.added",
 		"response.output_text.delta",
 		"response.output_item.added",
 		"response.function_call_arguments.delta",
@@ -668,26 +673,35 @@ func TestPipeGeminiToResponsesParityTextTool(t *testing.T) {
 	if got := gemRespParityTypes(evs); strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("event types = %v\nwant %v\n%s", got, want, dst.String())
 	}
-	// The announcement named the reasoning item; the text rode a silent id.
-	added := evs[2]
-	if item := added["item"].(map[string]any); item["type"] != "reasoning" || item["summary"] != nil || item["id"] != "rs_0" {
-		t.Fatalf("index-0 announcement = %#v", item)
+	rsAdded := evs[2]
+	if item := rsAdded["item"].(map[string]any); item["type"] != "reasoning" || item["summary"] != nil || item["id"] != "rs_0" {
+		t.Fatalf("reasoning announcement = %#v", item)
 	}
-	if added["output_index"] != float64(0) {
-		t.Fatalf("output_index = %#v", added["output_index"])
+	if rsAdded["output_index"] != float64(0) {
+		t.Fatalf("reasoning output_index = %#v", rsAdded["output_index"])
 	}
-	delta := evs[3]
-	if delta["delta"] != "hi" || delta["item_id"] != "msg_1" || delta["output_index"] != float64(0) {
+	if d := evs[3]; d["delta"] != "think" || d["item_id"] != "rs_0" {
+		t.Fatalf("reasoning delta = %#v", d)
+	}
+	msgAdded := evs[4]
+	if item := msgAdded["item"].(map[string]any); item["type"] != "message" || item["id"] != "msg_1" {
+		t.Fatalf("message announcement = %#v", item)
+	}
+	if msgAdded["output_index"] != float64(1) {
+		t.Fatalf("message output_index = %#v", msgAdded["output_index"])
+	}
+	delta := evs[6]
+	if delta["delta"] != "hi" || delta["item_id"] != "msg_1" || delta["output_index"] != float64(1) {
 		t.Fatalf("text delta = %#v", delta)
 	}
-	toolAdded := evs[4]
-	if toolAdded["output_index"] != float64(1) {
+	toolAdded := evs[7]
+	if toolAdded["output_index"] != float64(2) {
 		t.Fatalf("tool output_index = %#v", toolAdded["output_index"])
 	}
 	if item := toolAdded["item"].(map[string]any); item["id"] != "call_2" || item["call_id"] != "call_2" || item["name"] != "f" || item["arguments"] != "" {
 		t.Fatalf("tool announcement = %#v", item)
 	}
-	if d := evs[5]; d["delta"] != `{"a": 1}` {
+	if d := evs[8]; d["delta"] != `{"a": 1}` {
 		t.Fatalf("args delta = %#v", d["delta"])
 	}
 	// The message part done carries the whole reasoning text — the shape the
@@ -699,7 +713,7 @@ func TestPipeGeminiToResponsesParityTextTool(t *testing.T) {
 	if td := gemRespParityFind(evs, "response.output_text.done"); td["text"] != "hi" {
 		t.Fatalf("text done = %#v", td["text"])
 	}
-	// The terminal: output in the fixed order, usage through the accounting.
+	// The terminal: output in index order, usage through the accounting.
 	comp := gemRespParityFind(evs, "response.completed")
 	resp := comp["response"].(map[string]any)
 	if resp["status"] != "completed" || resp["model"] != "m" {
@@ -735,9 +749,9 @@ func TestPipeGeminiToResponsesParityTextTool(t *testing.T) {
 	}
 }
 
-// The first-chunk swallow: only the second and later thought frames emit
-// reasoning deltas; the whole text still arrives in the closing events
-// (reference st_thought_only run — deltas ["B"], part reasoning "AB").
+// Every thought frame streams its delta — the reference's iterator swallows
+// the first one to its one-shot announcement queueing; this library keeps all
+// of them (deltas ["A","B"], part reasoning "AB").
 func TestPipeGeminiToResponsesParityThoughtSwallow(t *testing.T) {
 	src := strings.Join([]string{
 		`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"A","thought":true}]},"index":0}],"responseId":"r2"}`,
@@ -758,8 +772,8 @@ func TestPipeGeminiToResponsesParityThoughtSwallow(t *testing.T) {
 			deltas = append(deltas, e["delta"].(string))
 		}
 	}
-	if strings.Join(deltas, ",") != "B" {
-		t.Fatalf("reasoning deltas = %v, want [B]:\n%s", deltas, dst.String())
+	if strings.Join(deltas, ",") != "A,B" {
+		t.Fatalf("reasoning deltas = %v, want [A B]:\n%s", deltas, dst.String())
 	}
 	part := gemRespParityFind(evs, "response.content_part.done")
 	if fmtJSON(part["part"]) != `{"reasoning":"AB","type":"reasoning_text"}` {
@@ -772,10 +786,10 @@ func TestPipeGeminiToResponsesParityThoughtSwallow(t *testing.T) {
 	}
 }
 
-// A plain text stream: the first frame spends its delta on the message
-// announcement (message item plus empty content part), the rest stream — the
-// full text still lands in the done events (reference st_plain_text run:
-// delta only "lo", done text "hello").
+// A plain text stream: the first frame announces the message item (plus its
+// empty content part) AND streams its delta — the reference spends the first
+// frame's delta on the announcement; this library keeps every frame's content
+// (deltas ["hel","lo"], done text "hello").
 func TestPipeGeminiToResponsesParityPlainText(t *testing.T) {
 	src := strings.Join([]string{
 		`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"hel"}]},"index":0}],"responseId":"r3"}`,
@@ -803,8 +817,8 @@ func TestPipeGeminiToResponsesParityPlainText(t *testing.T) {
 			deltas = append(deltas, e["delta"].(string))
 		}
 	}
-	if strings.Join(deltas, "") != "lo" {
-		t.Fatalf("text deltas = %v, want [lo]:\n%s", deltas, dst.String())
+	if strings.Join(deltas, ",") != "hel,lo" {
+		t.Fatalf("text deltas = %v, want [hel lo]:\n%s", deltas, dst.String())
 	}
 	if td := gemRespParityFind(evs, "response.output_text.done"); td["text"] != "hello" {
 		t.Fatalf("text done = %#v", td["text"])
@@ -935,10 +949,11 @@ func TestPipeGeminiToResponsesParityThoughtSignatures(t *testing.T) {
 	}
 }
 
-// Tool-first streams: the index-0 announcement is burned (nothing named), the
-// tool announces itself from index 1, and a later text frame streams under a
-// silently-minted message id (reference st_tool_native_id and
-// st_text_then_tool_late runs).
+// Tool-first streams: the call announces itself at index 0, and a later text
+// frame opens and announces the message item at the next index — the text
+// rides an item the client has seen declared. (The reference's bridge burns
+// its one announcement on the tool frame; the late text then streams under a
+// silently-minted id.)
 func TestPipeGeminiToResponsesParityToolFirst(t *testing.T) {
 	src := strings.Join([]string{
 		`data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"f","args":{"a":1},"id":"native_1"}}]},"index":0}],"responseId":"r9"}`,
@@ -959,11 +974,14 @@ func TestPipeGeminiToResponsesParityToolFirst(t *testing.T) {
 			added = append(added, e)
 		}
 	}
-	if len(added) != 1 {
-		t.Fatalf("announcements = %#v, want the tool alone", added)
+	if len(added) != 2 {
+		t.Fatalf("announcements = %#v, want the tool then the message", added)
 	}
-	if item := added[0]["item"].(map[string]any); item["id"] != "native_1" || added[0]["output_index"] != float64(1) {
+	if item := added[0]["item"].(map[string]any); item["id"] != "native_1" || added[0]["output_index"] != float64(0) {
 		t.Fatalf("tool announcement = %#v", added[0])
+	}
+	if item := added[1]["item"].(map[string]any); item["type"] != "message" || added[1]["output_index"] != float64(1) {
+		t.Fatalf("message announcement = %#v", added[1])
 	}
 	delta := gemRespParityFind(evs, "response.output_text.delta")
 	if delta == nil || delta["delta"] != "after" || delta["item_id"] != "msg_0" {
@@ -971,14 +989,14 @@ func TestPipeGeminiToResponsesParityToolFirst(t *testing.T) {
 	}
 	comp := gemRespParityFind(evs, "response.completed")
 	output := comp["response"].(map[string]any)["output"].([]any)
-	if len(output) != 2 || output[0].(map[string]any)["type"] != "message" || output[1].(map[string]any)["type"] != "function_call" {
+	if len(output) != 2 || output[0].(map[string]any)["type"] != "function_call" || output[1].(map[string]any)["type"] != "message" {
 		t.Fatalf("terminal output = %#v", output)
 	}
-	if text := output[0].(map[string]any)["content"].([]any)[0].(map[string]any)["text"]; text != "after" {
-		t.Fatalf("terminal message text = %#v, want the streamed text", text)
-	}
-	if call := output[1].(map[string]any); call["call_id"] != "native_1" || call["arguments"] != `{"a": 1}` {
+	if call := output[0].(map[string]any); call["call_id"] != "native_1" || call["arguments"] != `{"a": 1}` {
 		t.Fatalf("terminal call = %#v", call)
+	}
+	if text := output[1].(map[string]any)["content"].([]any)[0].(map[string]any)["text"]; text != "after" {
+		t.Fatalf("terminal message text = %#v, want the streamed text", text)
 	}
 }
 
@@ -999,11 +1017,12 @@ func TestPipeGeminiToResponsesParityUsageOnlyFrameSurvives(t *testing.T) {
 		t.Fatal(err)
 	}
 	evs := gemRespParityEvents(t, dst.String())
-	// One announcement, one swallowed first delta, the terminal — nothing for
-	// the usage-only frame itself.
+	// One announcement with its content part, the first frame's delta, the
+	// terminal — nothing for the usage-only frame itself.
 	want := []string{
 		"response.created", "response.in_progress",
 		"response.output_item.added", "response.content_part.added",
+		"response.output_text.delta",
 		"response.output_text.done", "response.content_part.done",
 		"response.output_item.done", "response.completed",
 	}

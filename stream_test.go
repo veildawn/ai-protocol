@@ -383,14 +383,16 @@ data: {"type":"message_stop"}
 
 `
 
-// The full lifecycle of a thinking+tool+text turn, pinned to the reference
-// (litellm v1.100.1, reproduced by serving /v1/responses off this exact
-// Anthropic stream): the one index-0 announcement is the REASONING item (the
-// first content chunk is a thinking delta — the message item of a
-// reasoning-first stream is never announced and carries no content_part.added),
-// the reasoning stretch closes with its done trio at the first following
-// chunk, and the end-of-stream dones run tools before the message. The
-// completed snapshot orders reasoning, message, function_call.
+// The full lifecycle of a thinking+tool+text turn: every item announces
+// itself when it opens — the reasoning item off its first thinking delta, the
+// call off its block, the message item off the text that follows — each at
+// its own output_index in open order (the reference's bridge announces only
+// the reasoning item on this shape, leaving the message item's text deltas
+// addressing an item no output_item.added had declared; this library declines
+// to keep that). The reasoning stretch closes with its done trio at the first
+// following chunk, and the end-of-stream dones run tools before the message.
+// The completed snapshot orders its output array by output_index: reasoning,
+// function_call, message.
 func TestPipeMessagesToResponsesToolAndText(t *testing.T) {
 	var dst bytes.Buffer
 	if _, err := PipeStream(Messages, Responses, &dst, strings.NewReader(messagesToolStream), StreamOpts{}); err != nil {
@@ -399,10 +401,10 @@ func TestPipeMessagesToResponsesToolAndText(t *testing.T) {
 	evs := responseEvents(t, dst.String())
 
 	added := eventsOfType(evs, "response.output_item.added")
-	if len(added) != 2 {
-		t.Fatalf("output_item.added count=%d, want reasoning+function_call (the message item is never announced on a reasoning-first stream):\n%s", len(added), dst.String())
+	if len(added) != 3 {
+		t.Fatalf("output_item.added count=%d, want reasoning+function_call+message:\n%s", len(added), dst.String())
 	}
-	var wantTypes = []string{"reasoning", "function_call"}
+	var wantTypes = []string{"reasoning", "function_call", "message"}
 	var itemIDs []string
 	for i, a := range added {
 		item, _ := a["item"].(map[string]any)
@@ -413,8 +415,8 @@ func TestPipeMessagesToResponsesToolAndText(t *testing.T) {
 		if id == "" {
 			t.Fatalf("item %d missing id: %v", i, item)
 		}
-		if _, ok := a["output_index"]; !ok {
-			t.Fatalf("added %d missing output_index: %v", i, a)
+		if a["output_index"] != float64(i) {
+			t.Fatalf("added %d output_index=%v want %d (open order)", i, a["output_index"], i)
 		}
 		itemIDs = append(itemIDs, id)
 	}
@@ -438,13 +440,13 @@ func TestPipeMessagesToResponsesToolAndText(t *testing.T) {
 			t.Fatalf("%s count=%d, want 1:\n%s", typ, len(eventsOfType(evs, typ)), dst.String())
 		}
 	}
-	// The part is only ever closed, never opened: the reference emits no
-	// reasoning_summary_part.added and, on a reasoning-first stream, no
-	// content_part.added either.
-	for _, gone := range []string{"response.reasoning_summary_part.added", "response.content_part.added"} {
-		if len(eventsOfType(evs, gone)) != 0 {
-			t.Fatalf("%s must not be emitted on a reasoning-first stream:\n%s", gone, dst.String())
-		}
+	// The reasoning part is only ever closed, never opened; the message part
+	// opens with the message item.
+	if len(eventsOfType(evs, "response.reasoning_summary_part.added")) != 0 {
+		t.Fatalf("response.reasoning_summary_part.added must not be emitted:\n%s", dst.String())
+	}
+	if len(eventsOfType(evs, "response.content_part.added")) != 1 {
+		t.Fatalf("content_part.added count=%d, want the message item's one:\n%s", len(eventsOfType(evs, "response.content_part.added")), dst.String())
 	}
 	var fcArgs strings.Builder
 	for _, d := range eventsOfType(evs, "response.function_call_arguments.delta") {
@@ -458,7 +460,7 @@ func TestPipeMessagesToResponsesToolAndText(t *testing.T) {
 	}
 	for _, d := range eventsOfType(evs, "response.output_text.delta") {
 		if id, _ := d["item_id"].(string); !strings.HasPrefix(id, "msg_") {
-			t.Fatalf("text delta item_id=%v, want the unannounced msg_ id", d["item_id"])
+			t.Fatalf("text delta item_id=%v, want the message item's msg_ id", d["item_id"])
 		}
 		if _, ok := d["content_index"]; !ok {
 			t.Fatalf("text delta missing content_index: %v", d)
@@ -490,14 +492,13 @@ func TestPipeMessagesToResponsesToolAndText(t *testing.T) {
 		t.Fatalf("output[0]=%v", rs)
 	}
 	fc, _ := out[1].(map[string]any)
-	if fc["type"] != "message" {
-		t.Fatalf("output[1]=%v, want the message before the call", fc)
+	if fc["type"] != "function_call" || fc["call_id"] != "toolu_1" || fc["name"] != "exec_command" || fc["arguments"] != `{"cmd": "ls"}` {
+		t.Fatalf("output[1]=%v, want the call in output_index order", fc)
 	}
-	fc2, _ := out[2].(map[string]any)
-	if fc2["type"] != "function_call" || fc2["call_id"] != "toolu_1" || fc2["name"] != "exec_command" || fc2["arguments"] != `{"cmd": "ls"}` {
-		t.Fatalf("output[2]=%v", fc2)
+	msg, _ := out[2].(map[string]any)
+	if msg["type"] != "message" {
+		t.Fatalf("output[2]=%v, want the message the stream opened last", msg)
 	}
-	msg := out[1].(map[string]any)
 	parts, _ := msg["content"].([]any)
 	p0, _ := parts[0].(map[string]any)
 	if p0["text"] != "done" {

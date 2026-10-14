@@ -148,10 +148,11 @@ func TestResponseForwardPinnedCases(t *testing.T) {
 	 "usage":{"input_tokens":5,"output_tokens":0,"total_tokens":5}}`)
 }
 
-// TestStreamForwardSequence pins the gemini->responses stream fold to the
-// event order the reference's bridge emits: reasoning-first announces the
-// reasoning item at index 0, the tool announces itself from index 1, and the
-// turn closes with the done trio plus response.completed.
+// TestStreamForwardSequence pins the gemini->responses stream fold's event
+// order: every item announces itself when it opens — the reasoning item off
+// its first thought frame (delta included), the message item off the text
+// frame that follows, the tool after them — and the turn closes with the done
+// trio plus response.completed.
 func TestStreamForwardSequence(t *testing.T) {
 	frames := []string{
 		`{"candidates":[{"content":{"role":"model","parts":[{"text":"think","thought":true}]},"index":0}],"responseId":"r1"}`,
@@ -176,6 +177,9 @@ func TestStreamForwardSequence(t *testing.T) {
 	want := []string{
 		"response.created", "response.in_progress",
 		"response.output_item.added",
+		"response.reasoning_summary_text.delta",
+		"response.output_item.added",
+		"response.content_part.added",
 		"response.output_text.delta",
 		"response.output_item.added",
 		"response.function_call_arguments.delta",

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
 	"github.com/veildawn/ai-protocol/internal/jsonx"
@@ -30,9 +31,7 @@ type StreamOpts struct {
 // the same one (StreamResult carries it as Truncated). See PipeResponsesToChat
 // for the worked case that made this the rule.
 func PipeMessagesToResponses(dst io.Writer, src io.Reader, opts StreamOpts) (int64, error) {
-	// output_index 0 belongs to the merged message/reasoning item; tools are
-	// announced from 1.
-	st := &msgToResp{model: opts.Model, nextTool: 1}
+	st := &msgToResp{model: opts.Model}
 	var n int64
 	write := func(evs []stream.Event) error {
 		for _, out := range evs {
@@ -151,7 +150,7 @@ type msgToolItem struct {
 	callID string
 	name   string
 	args   strings.Builder
-	index  int // output_index; 0 is reserved for the merged message/reasoning item
+	index  int // output_index, allocated in open order like every other item
 }
 
 type msgToResp struct {
@@ -160,15 +159,25 @@ type msgToResp struct {
 	id      string
 	model   string
 
-	msgID string // minted with the prelude or at the first text delta; every message event references it
-	rsID  string // minted at the first thinking delta; the reasoning events reference it
+	// msgID/msgIdx name the message item, minted when it opens — its first
+	// text delta, or the close of a turn that never carried text. rsID/rsIdx
+	// name the reasoning item, minted at its first thinking delta. Every event
+	// the item generates references the pair.
+	msgID  string
+	msgIdx int
+	rsID   string
+	rsIdx  int
+	// nextIdx allocates the output_index every item takes when it opens, in
+	// open order, so each item is announced as its own output item the moment
+	// it opens — the shape the Responses wire itself uses. The reference's
+	// bridge instead announces exactly one item off the first content chunk
+	// (reasoning for a thinking delta, nothing for a tool chunk, the message
+	// item otherwise) and never announces a second, so a thinking- or
+	// tool-first stream's message item streamed its text as deltas addressing
+	// an item no output_item.added had ever declared — dropped by
+	// protocol-abiding clients, the model's text lost while usage reported.
+	nextIdx int
 
-	// announced records that the stream's one index-0 item was decided — the
-	// reference's bridge announces exactly one item off the first content
-	// chunk (reasoning for a thinking delta, nothing for a tool chunk, the
-	// message item otherwise) and never announces a second, so a thinking- or
-	// tool-first stream's message item is only ever named by its own events.
-	announced bool
 	// reasoningActive/reasoningDone track the reasoning item's lifecycle: the
 	// reference closes a reasoning stretch with its done trio at the first
 	// following non-reasoning chunk, not at the end of the stream.
@@ -179,7 +188,6 @@ type msgToResp struct {
 	thinking []*msgThinkingBlock
 	tools    []*msgToolItem
 	blocks   map[int]*msgToolItem // content-block index → tool item
-	nextTool int                  // next tool output_index, from 1
 
 	seq      int
 	eventSeq int
@@ -232,58 +240,34 @@ func (s *msgToResp) openShells() []stream.Event {
 	}
 }
 
-// announce opens the stream's one index-0 item the way the reference's bridge
-// does off the first content chunk: a thinking delta announces the merged
-// reasoning item (its deltas then reference the rs id), anything else announces
-// the message item together with its content part. A tool chunk announces
-// nothing — markAnnounced covers that case: the tools announce themselves from
-// index 1 and the message item is never announced after them.
-func (s *msgToResp) announce(reasoningFirst bool) []stream.Event {
-	if s.markAnnounced() {
-		return nil
-	}
-	if reasoningFirst {
-		s.rsID = fmt.Sprintf("rs_%d", s.seq)
-		s.seq++
-		// No summary member on the wire: the reference's event serializes it
-		// as null, which the Responses wire drops for this item.
-		return []stream.Event{s.respEvent("response.output_item.added", map[string]any{
-			"output_index": 0,
-			"item":         map[string]any{"id": s.rsID, "type": "reasoning", "status": "in_progress"},
-		})}
-	}
-	return s.announceMessage()
-}
-
-// announceMessage announces the merged message item and its content part; used
-// for a content-first stream and, at the close, for a stream that never carried
-// content the bridge could announce off (an empty turn still gets its item).
-func (s *msgToResp) announceMessage() []stream.Event {
-	s.msgID = fmt.Sprintf("msg_%d", s.seq)
-	s.seq++
+// openMessageItem announces the message item with its content part. The id and
+// output_index are minted by the caller (the first text delta, or the close of
+// a turn that never carried text — an empty turn still gets its item, the shape
+// the non-streaming fold also produces).
+func (s *msgToResp) openMessageItem() []stream.Event {
 	return []stream.Event{
 		s.respEvent("response.output_item.added", map[string]any{
-			"output_index": 0,
+			"output_index": s.msgIdx,
 			"item": map[string]any{
 				"id": s.msgID, "type": "message", "role": "assistant",
 				"status": "in_progress", "content": []any{},
 			},
 		}),
 		s.respEvent("response.content_part.added", map[string]any{
-			"item_id": s.msgID, "output_index": 0, "content_index": 0,
+			"item_id": s.msgID, "output_index": s.msgIdx, "content_index": 0,
 			"part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}},
 		}),
 	}
 }
 
-// markAnnounced latches the one announcement this stream gets and reports
-// whether it had already been spent.
-func (s *msgToResp) markAnnounced() bool {
-	if s.announced {
-		return true
-	}
-	s.announced = true
-	return false
+// openReasoningItem announces the reasoning item. No summary member on the
+// wire: the reference's event serializes it as null, which the Responses wire
+// drops for this item.
+func (s *msgToResp) openReasoningItem() []stream.Event {
+	return []stream.Event{s.respEvent("response.output_item.added", map[string]any{
+		"output_index": s.rsIdx,
+		"item":         map[string]any{"id": s.rsID, "type": "reasoning", "status": "in_progress"},
+	})}
 }
 
 // reasoningText concatenates the turn's thinking text — the summary the
@@ -311,18 +295,20 @@ func (s *msgToResp) maybeReasoningDone() []stream.Event {
 	if s.rsID == "" {
 		s.rsID = fmt.Sprintf("rs_%d", s.seq)
 		s.seq++
+		s.rsIdx = s.nextIdx
+		s.nextIdx++
 	}
 	text := s.reasoningText()
 	return []stream.Event{
 		s.respEvent("response.reasoning_summary_text.done", map[string]any{
-			"item_id": s.rsID, "output_index": 0, "summary_index": 0, "text": text,
+			"item_id": s.rsID, "output_index": s.rsIdx, "summary_index": 0, "text": text,
 		}),
 		s.respEvent("response.reasoning_summary_part.done", map[string]any{
-			"item_id": s.rsID, "output_index": 0, "summary_index": 0,
+			"item_id": s.rsID, "output_index": s.rsIdx, "summary_index": 0,
 			"part": map[string]any{"type": "summary_text", "text": text},
 		}),
 		s.respEvent("response.output_item.done", map[string]any{
-			"output_index": 0,
+			"output_index": s.rsIdx,
 			"item": map[string]any{
 				"id": s.rsID, "type": "reasoning",
 				"summary": []any{map[string]any{"type": "summary_text", "text": text}},
@@ -337,9 +323,9 @@ func (s *msgToResp) openTool(idx int, cb map[string]any) []stream.Event {
 	t := &msgToolItem{
 		callID: jsonx.GetString(cb, "id"),
 		name:   jsonx.GetString(cb, "name"),
-		index:  s.nextTool,
+		index:  s.nextIdx,
 	}
-	s.nextTool++
+	s.nextIdx++
 	if s.blocks == nil {
 		s.blocks = map[int]*msgToolItem{}
 	}
@@ -389,9 +375,9 @@ func (s *msgToResp) feed(event string, obj map[string]any) []stream.Event {
 		typ = jsonx.GetString(obj, "type")
 	}
 	var evs []stream.Event
-	// The shells open on the first frame, whatever it is — which index-0 item
-	// the stream announces is decided by the first content chunk below, not by
-	// the opening frame. message_start defers its shells to the end of its own
+	// The shells open on the first frame, whatever it is — which items the
+	// stream announces is decided by the content chunks below, not by the
+	// opening frame. message_start defers its shells to the end of its own
 	// case so they can carry the id and model it names, the way the reference
 	// read-aheads one chunk before opening the Responses stream.
 	if typ != "message_start" {
@@ -429,12 +415,10 @@ func (s *msgToResp) feed(event string, obj map[string]any) []stream.Event {
 				redacted: true, data: jsonx.GetString(cb, "data"),
 			})
 		case "tool_use", "server_tool_use":
-			// A tool chunk is a reasoning-end trigger, and it announces nothing
-			// at index 0: the reference's bridge spends its one announcement
-			// without emitting an event, so the message item of a tool-first
-			// stream is never announced.
+			// A tool chunk is a reasoning-end trigger. It announces itself at
+			// its own output_index; a message item whose text arrives later
+			// announces itself when it does.
 			evs = append(evs, s.maybeReasoningDone()...)
-			s.markAnnounced()
 			// A server-side call the model made is still a call: the reference
 			// folds server_tool_use through the same tool_call path as
 			// tool_use, and dropping its block would lose the call.
@@ -449,15 +433,19 @@ func (s *msgToResp) feed(event string, obj map[string]any) []stream.Event {
 		switch jsonx.GetString(delta, "type") {
 		case "text_delta":
 			evs = append(evs, s.maybeReasoningDone()...)
-			evs = append(evs, s.announce(false)...)
+			// The message item opens at its first text, whenever that is —
+			// after reasoning or after a tool call alike.
 			if s.msgID == "" {
 				s.msgID = fmt.Sprintf("msg_%d", s.seq)
 				s.seq++
+				s.msgIdx = s.nextIdx
+				s.nextIdx++
+				evs = append(evs, s.openMessageItem()...)
 			}
 			text := jsonx.GetString(delta, "text")
 			s.text.WriteString(text)
 			evs = append(evs, s.respEvent("response.output_text.delta", map[string]any{
-				"item_id": s.msgID, "output_index": 0, "content_index": 0, "delta": text,
+				"item_id": s.msgID, "output_index": s.msgIdx, "content_index": 0, "delta": text,
 			}))
 		case "thinking_delta":
 			thinking := jsonx.GetString(delta, "thinking")
@@ -466,13 +454,16 @@ func (s *msgToResp) feed(event string, obj map[string]any) []stream.Event {
 			}
 			s.thinking[len(s.thinking)-1].text.WriteString(thinking)
 			s.reasoningActive = true
-			evs = append(evs, s.announce(true)...)
+			// The reasoning item opens at its first thinking, whenever that is.
 			if s.rsID == "" {
 				s.rsID = fmt.Sprintf("rs_%d", s.seq)
 				s.seq++
+				s.rsIdx = s.nextIdx
+				s.nextIdx++
+				evs = append(evs, s.openReasoningItem()...)
 			}
 			evs = append(evs, s.respEvent("response.reasoning_summary_text.delta", map[string]any{
-				"item_id": s.rsID, "output_index": 0, "summary_index": 0, "delta": thinking,
+				"item_id": s.rsID, "output_index": s.rsIdx, "summary_index": 0, "delta": thinking,
 			}))
 		case "signature_delta":
 			if len(s.thinking) > 0 {
@@ -530,21 +521,20 @@ func (s *msgToResp) complete() []stream.Event {
 	}
 	s.closed = true
 	var evs []stream.Event
-	// A stream that never carried content the bridge could announce off still
-	// announces its message item — an empty turn's item arrives with its done
-	// events, the shape the reference's default branch produces at the finish
-	// chunk.
-	if !s.announced {
-		evs = append(evs, s.announceMessage()...)
-		s.announced = true
+	// A turn that never carried text still gets its message item — announced
+	// here, ahead of the done events that close it, so those reference an item
+	// the client has seen declared. This is the shape the non-streaming fold
+	// also produces (a message item for every assistant turn, text or not).
+	if s.msgID == "" {
+		s.msgID = fmt.Sprintf("msg_%d", s.seq)
+		s.seq++
+		s.msgIdx = s.nextIdx
+		s.nextIdx++
+		evs = append(evs, s.openMessageItem()...)
 	}
 	status := stopReasonToStatus(s.stop)
 	text := s.text.String()
 	reasoningText, preserved := mergeThinking(blockMaps(s.thinking))
-	if s.msgID == "" {
-		s.msgID = fmt.Sprintf("msg_%d", s.seq)
-		s.seq++
-	}
 
 	// Done events are deferred to the end of the stream, tools before the
 	// message regardless of source order — the order the reference's bridge
@@ -580,42 +570,55 @@ func (s *msgToResp) complete() []stream.Event {
 	}
 	evs = append(evs,
 		s.respEvent("response.output_text.done", map[string]any{
-			"item_id": s.msgID, "output_index": 0, "content_index": 0, "text": text,
+			"item_id": s.msgID, "output_index": s.msgIdx, "content_index": 0, "text": text,
 		}),
 		s.respEvent("response.content_part.done", map[string]any{
-			"item_id": s.msgID, "output_index": 0, "content_index": 0, "part": part,
+			"item_id": s.msgID, "output_index": s.msgIdx, "content_index": 0, "part": part,
 		}),
 		s.respEvent("response.output_item.done", map[string]any{
-			"output_index": 0,
+			"output_index": s.msgIdx,
 			"item": map[string]any{
 				"id": s.msgID, "status": "completed", "type": "message", "role": "assistant",
 				"content": []any{map[string]any{"type": "output_text", "text": text, "annotations": []any{}}},
 			},
 		}))
 
-	// The completed snapshot carries the same ids the streamed events used.
-	var output []any
+	// The completed snapshot carries the same ids the streamed events used,
+	// its output array in output_index order so the payload agrees with the
+	// per-item events about the turn's shape.
+	type indexedItem struct {
+		idx  int
+		item any
+	}
+	var indexed []indexedItem
 	if reasoningText != "" || len(preserved) > 0 {
 		if s.rsID == "" {
 			s.rsID = fmt.Sprintf("rs_%d", s.seq)
 			s.seq++
+			s.rsIdx = s.nextIdx
+			s.nextIdx++
 		}
-		output = append(output, reasoningItem(reasoningText, preserved, s.rsID, status))
+		indexed = append(indexed, indexedItem{s.rsIdx, reasoningItem(reasoningText, preserved, s.rsID, status)})
 	}
 	// The streaming snapshot keeps the message part's text even when empty:
 	// the reference's chunk assembler holds content "" (not null), so the
 	// empty string survives onto the wire here — unlike the non-streaming
 	// fold, whose transform nulls empty content out.
 	msgPart := map[string]any{"type": "output_text", "text": text, "annotations": []any{}}
-	output = append(output, map[string]any{
+	indexed = append(indexed, indexedItem{s.msgIdx, map[string]any{
 		"id": s.msgID, "type": "message", "role": "assistant", "status": status,
 		"content": []any{msgPart},
-	})
+	}})
 	for _, t := range s.tools {
-		output = append(output, map[string]any{
+		indexed = append(indexed, indexedItem{t.index, map[string]any{
 			"type": "function_call", "id": t.callID, "call_id": t.callID,
 			"name": t.name, "arguments": t.finalArgs(), "status": "completed",
-		})
+		}})
+	}
+	sort.Slice(indexed, func(i, j int) bool { return indexed[i].idx < indexed[j].idx })
+	output := make([]any, len(indexed))
+	for i, it := range indexed {
+		output[i] = it.item
 	}
 	// The reference's calculate_usage folds cache_creation and cache_read into
 	// prompt_tokens before the responses usage is built, and the terminal

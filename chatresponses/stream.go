@@ -125,12 +125,6 @@ type chatToRespState struct {
 	nextIdx  int
 	seq      int
 	eventSeq int
-	// textOpened marks that the shared output_index-0 slot's opening frame has
-	// had its one chance. The reference's bridge emits output_item.added for
-	// that slot at most once per stream — whichever text kind (reasoning or
-	// message) opens it owns it, and a tool-first chunk burns it without
-	// emitting anything (streaming_iterator _ensure_output_item_for_chunk).
-	textOpened bool
 
 	msg    *chatRespItem            // the one message item, opened lazily
 	rs     *chatRespItem            // the one reasoning item, opened lazily
@@ -170,15 +164,15 @@ func (s *chatToRespState) responseShell() map[string]any {
 }
 
 func (s *chatToRespState) newItem(kind, prefix string) *chatRespItem {
-	// The text items — reasoning and message — share output_index 0, the slot
-	// the reference's bridge reserves for "the message item"; tool calls count
-	// from 1 (streaming_iterator: output_index=0 reserved for the message
-	// item).
-	index := 0
-	if kind == "function_call" {
-		s.nextIdx++
-		index = s.nextIdx
-	}
+	// Every item takes the next output_index in open order — the shape the
+	// Responses wire itself uses, each item announced as its own output item
+	// the moment it opens. The text kinds no longer share a reserved slot 0
+	// with a one-shot announcement: a tool-first chunk used to burn that
+	// announcement, and the message item's text then streamed as deltas
+	// addressing an item no output_item.added had ever declared — dropped by
+	// protocol-abiding clients, the model's text lost while usage reported.
+	index := s.nextIdx
+	s.nextIdx++
 	it := &chatRespItem{kind: kind, id: fmt.Sprintf("%s_%d", prefix, s.seq), index: index}
 	s.seq++
 	s.items = append(s.items, it)
@@ -186,17 +180,11 @@ func (s *chatToRespState) newItem(kind, prefix string) *chatRespItem {
 }
 
 // openEvents emits the item's opening frame pair: output_item.added, then the
-// part frame a message needs before its first delta. The shared text slot gets
-// its added frame at most once per stream — the second text kind rides the slot
-// the first opened, and a reasoning item never carries a part frame at all
-// (the reference's protocol emits none for it).
+// part frame a message needs before its first delta. Each item announces
+// itself exactly once, when it opens — whichever chunk opens it, in whatever
+// order the source chose. (A reasoning item never carries a part frame at all;
+// the reference's protocol emits none for it.)
 func (s *chatToRespState) openEvents(it *chatRespItem) []stream.Event {
-	if it.kind != "function_call" {
-		if s.textOpened {
-			return nil
-		}
-		s.textOpened = true
-	}
 	var item map[string]any
 	var partType string
 	var partFields map[string]any
@@ -359,10 +347,6 @@ func (s *chatToRespState) fcFor(tm map[string]any) (*chatRespItem, []stream.Even
 		s.lastFC = it
 		return it, nil
 	}
-	// A tool-first chunk consumes the shared text slot's opening frame without
-	// emitting it — text that arrives after a call rides slot 0 unopened, the
-	// way the reference's one-shot gate behaves.
-	s.textOpened = true
 	it = s.newItem("function_call", "fc")
 	it.callID = jsonx.GetString(tm, "id")
 	// The item id IS the call id on the reference's wire (it puts the chat

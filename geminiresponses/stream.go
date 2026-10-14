@@ -11,6 +11,7 @@ package geminiresponses
 import (
 	"encoding/json"
 	"io"
+	"sort"
 	"strings"
 
 	"github.com/veildawn/ai-protocol/internal/jsonx"
@@ -30,12 +31,17 @@ type StreamOpts struct {
 // events.
 //
 // The reference reaches this pair through its chat hop, and its bridge owns
-// several quirks this fold reproduces: the stream's one index-0 announcement
-// is decided by the first content frame (a reasoning frame announces the
-// reasoning item, a tool frame announces nothing and burns the slot), the
-// frame that spends the announcement loses its own delta, and every turn
-// closes with response.completed — an unfinished one says so in the response
-// status rather than the event name.
+// one quirk this fold used to reproduce and now deliberately does not: it
+// announces exactly one output item off the first content frame (a tool frame
+// spends the announcement without emitting one, and the frame that spends it
+// loses its own delta), so the message item of a tool-first turn streamed its
+// text as deltas addressing an item no output_item.added had ever declared —
+// dropped by protocol-abiding clients — and a frame carrying both text and a
+// call had to choose which content survived. This fold instead announces every
+// item when it opens and lets a frame contribute all the content it carried.
+//
+// One reference quirk is kept: every turn closes with response.completed — an
+// unfinished one says so in the response status rather than the event name.
 //
 // The turn is only closed when the source said so: a frame carrying a finish
 // reason (or a blocked prompt) closes it with a terminal that states how the
@@ -152,11 +158,18 @@ type gemToResp struct {
 	seq      int
 	eventSeq int
 
-	// itemOpened latches the stream's one index-0 announcement, spent by the
-	// first content frame; itemKind records what it announced.
-	itemOpened bool
-	rsID       string
-	msgID      string
+	// msgID/msgIdx name the message item, minted when it opens — its first
+	// text frame, or the close of a turn that never carried text. rsID/rsIdx
+	// name the reasoning item, minted at its first thought frame. Every event
+	// the item generates references the pair.
+	msgID  string
+	msgIdx int
+	rsID   string
+	rsIdx  int
+	// nextIdx allocates the output_index every item takes when it opens, in
+	// open order, so each item is announced as its own output item the moment
+	// it opens — the shape the Responses wire itself uses.
+	nextIdx int
 
 	text      strings.Builder
 	reasoning strings.Builder
@@ -164,7 +177,6 @@ type gemToResp struct {
 	images    []string
 	tools     []*streamTool
 	byCallID  map[string]*streamTool
-	nextTool  int
 
 	finish        string
 	usageMetadata any
@@ -247,19 +259,11 @@ func (s *gemToResp) feed(obj map[string]any) []stream.Event {
 		// into one content-filtered turn, and so does this fold. Its blocked
 		// frame carries an assistant-role delta, so the message item is
 		// announced before the turn closes.
-		if !s.itemOpened {
-			s.itemOpened = true
+		if s.msgID == "" {
 			s.msgID = s.mint("msg")
-			evs = append(evs,
-				s.respEvent("response.output_item.added", map[string]any{
-					"output_index": 0,
-					"item":         map[string]any{"id": s.msgID, "type": "message", "role": "assistant", "status": "in_progress", "content": []any{}},
-				}),
-				s.respEvent("response.content_part.added", map[string]any{
-					"item_id": s.msgID, "output_index": 0, "content_index": 0,
-					"part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}},
-				}),
-			)
+			s.msgIdx = s.nextIdx
+			s.nextIdx++
+			evs = append(evs, s.openMessageItem()...)
 		}
 		s.finish = "content_filter"
 		return append(evs, s.close()...)
@@ -277,35 +281,23 @@ func (s *gemToResp) feed(obj map[string]any) []stream.Event {
 	}
 	facts := parseFrame(cand)
 
-	swallowed := false
-	if !s.itemOpened {
-		s.itemOpened = true
-		switch {
-		case facts.reasoning != "":
-			s.rsID = s.mint("rs")
-			evs = append(evs, s.respEvent("response.output_item.added", map[string]any{
-				"output_index": 0,
-				"item":         map[string]any{"id": s.rsID, "type": "reasoning", "status": "in_progress", "summary": nil},
-			}))
-			swallowed = true
-		case len(facts.calls) > 0:
-			// A tool frame spends the announcement without emitting one: the
-			// tools announce themselves from index 1, and a message item that
-			// arrives later is never announced.
-		default:
-			s.msgID = s.mint("msg")
-			evs = append(evs,
-				s.respEvent("response.output_item.added", map[string]any{
-					"output_index": 0,
-					"item":         map[string]any{"id": s.msgID, "type": "message", "role": "assistant", "status": "in_progress", "content": []any{}},
-				}),
-				s.respEvent("response.content_part.added", map[string]any{
-					"item_id": s.msgID, "output_index": 0, "content_index": 0,
-					"part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}},
-				}),
-			)
-			swallowed = true
-		}
+	// Each item announces itself when it opens — the first frame carrying that
+	// kind of content, whichever order the source chose. The frame's own deltas
+	// still go out below; opening an item never costs its content.
+	if facts.reasoning != "" && s.rsID == "" {
+		s.rsID = s.mint("rs")
+		s.rsIdx = s.nextIdx
+		s.nextIdx++
+		evs = append(evs, s.respEvent("response.output_item.added", map[string]any{
+			"output_index": s.rsIdx,
+			"item":         map[string]any{"id": s.rsID, "type": "reasoning", "status": "in_progress", "summary": nil},
+		}))
+	}
+	if facts.text != "" && s.msgID == "" {
+		s.msgID = s.mint("msg")
+		s.msgIdx = s.nextIdx
+		s.nextIdx++
+		evs = append(evs, s.openMessageItem()...)
 	}
 	s.text.WriteString(facts.text)
 	s.reasoning.WriteString(facts.reasoning)
@@ -314,42 +306,44 @@ func (s *gemToResp) feed(obj map[string]any) []stream.Event {
 	if len(facts.sigs) > 0 {
 		s.lastSigs = facts.sigs
 	}
-	if fr := jsonx.GetString(cand, "finishReason"); fr != "" {
-		s.finish = mapFinishReason(fr)
-		return append(evs, s.close()...)
-	}
-	if swallowed {
-		// The frame that spent the announcement loses its own delta: the
-		// reference returns the announcement in the frame's place and never
-		// transforms the frame's content. The text still accumulates — the
-		// closing frames carry the whole of it.
-		return evs
-	}
-	if facts.reasoning != "" {
-		if s.rsID == "" {
-			s.rsID = s.mint("rs")
-		}
-		return append(evs, s.respEvent("response.reasoning_summary_text.delta", map[string]any{
-			"item_id": s.rsID, "output_index": 0, "summary_index": 0, "delta": facts.reasoning,
-		}))
-	}
-	if facts.text != "" {
-		s.ensureMsgID()
-		return append(evs, s.respEvent("response.output_text.delta", map[string]any{
-			"item_id": s.msgID, "output_index": 0, "content_index": 0, "delta": facts.text,
-		}))
-	}
+	// Calls go out before the finish check: a frame that carries a functionCall
+	// and its finishReason together is the wire's normal way to end a tool
+	// turn, and returning on the finish used to drop such a call entirely —
+	// as did a text delta arriving ahead of one in the same frame.
 	if len(facts.calls) > 0 {
 		for _, call := range facts.calls {
 			evs = append(evs, s.toolEvents(call)...)
 		}
 	}
+	if fr := jsonx.GetString(cand, "finishReason"); fr != "" {
+		s.finish = mapFinishReason(fr)
+		return append(evs, s.close()...)
+	}
+	if facts.reasoning != "" {
+		evs = append(evs, s.respEvent("response.reasoning_summary_text.delta", map[string]any{
+			"item_id": s.rsID, "output_index": s.rsIdx, "summary_index": 0, "delta": facts.reasoning,
+		}))
+	}
+	if facts.text != "" {
+		evs = append(evs, s.respEvent("response.output_text.delta", map[string]any{
+			"item_id": s.msgID, "output_index": s.msgIdx, "content_index": 0, "delta": facts.text,
+		}))
+	}
 	return evs
 }
 
-func (s *gemToResp) ensureMsgID() {
-	if s.msgID == "" {
-		s.msgID = s.mint("msg")
+// openMessageItem announces the message item with its content part; the id and
+// output_index are minted by the caller.
+func (s *gemToResp) openMessageItem() []stream.Event {
+	return []stream.Event{
+		s.respEvent("response.output_item.added", map[string]any{
+			"output_index": s.msgIdx,
+			"item":         map[string]any{"id": s.msgID, "type": "message", "role": "assistant", "status": "in_progress", "content": []any{}},
+		}),
+		s.respEvent("response.content_part.added", map[string]any{
+			"item_id": s.msgID, "output_index": s.msgIdx, "content_index": 0,
+			"part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}},
+		}),
 	}
 }
 
@@ -368,8 +362,8 @@ func (s *gemToResp) toolEvents(call parsedCall) []stream.Event {
 	}
 	tool := s.byCallID[id]
 	if tool == nil {
-		s.nextTool++
-		tool = &streamTool{id: id, name: call.name, index: s.nextTool}
+		tool = &streamTool{id: id, name: call.name, index: s.nextIdx}
+		s.nextIdx++
 		s.byCallID[id] = tool
 		s.tools = append(s.tools, tool)
 	}
@@ -410,6 +404,24 @@ func (s *gemToResp) close() []stream.Event {
 	}
 	s.closed = true
 	var evs []stream.Event
+	// A turn that never opened an item still gets it — announced ahead of the
+	// done events that close it, so those reference items the client has seen
+	// declared.
+	if s.msgID == "" {
+		s.msgID = s.mint("msg")
+		s.msgIdx = s.nextIdx
+		s.nextIdx++
+		evs = append(evs, s.openMessageItem()...)
+	}
+	if s.rsID == "" && s.reasoning.Len() > 0 {
+		s.rsID = s.mint("rs")
+		s.rsIdx = s.nextIdx
+		s.nextIdx++
+		evs = append(evs, s.respEvent("response.output_item.added", map[string]any{
+			"output_index": s.rsIdx,
+			"item":         map[string]any{"id": s.rsID, "type": "reasoning", "status": "in_progress", "summary": nil},
+		}))
+	}
 	for _, tool := range s.tools {
 		if !tool.declared {
 			tool.declared = true
@@ -441,10 +453,6 @@ func (s *gemToResp) close() []stream.Event {
 				},
 			}))
 	}
-	s.ensureMsgID()
-	if s.rsID == "" && s.reasoning.Len() > 0 {
-		s.rsID = s.mint("rs")
-	}
 	text := s.text.String()
 	reasoning := s.reasoning.String()
 	part := any(map[string]any{"type": "output_text", "text": text, "annotations": []any{}})
@@ -455,29 +463,32 @@ func (s *gemToResp) close() []stream.Event {
 	}
 	evs = append(evs,
 		s.respEvent("response.output_text.done", map[string]any{
-			"item_id": s.msgID, "output_index": 0, "content_index": 0, "text": text,
+			"item_id": s.msgID, "output_index": s.msgIdx, "content_index": 0, "text": text,
 		}),
 		s.respEvent("response.content_part.done", map[string]any{
-			"item_id": s.msgID, "output_index": 0, "content_index": 0, "part": part,
+			"item_id": s.msgID, "output_index": s.msgIdx, "content_index": 0, "part": part,
 		}),
 		s.respEvent("response.output_item.done", map[string]any{
-			"output_index": 0,
+			"output_index": s.msgIdx,
 			"item": map[string]any{
 				"id": s.msgID, "type": "message", "role": "assistant", "status": "completed",
 				"content": []any{map[string]any{"type": "output_text", "text": text, "annotations": []any{}}},
 			},
 		}))
 	status := finishToStatus(s.finish)
-	var output []any
+	// The completed snapshot's output array is assembled in output_index order,
+	// so the payload agrees with the per-item events about the turn's shape.
+	type indexedItem struct {
+		idx  int
+		item any
+	}
+	var indexed []indexedItem
 	// The reasoning item the stream terminal carries states its text alone:
 	// the stream side of the reference's bridge never encodes the signed
 	// thinking blocks into the item — that spelling belongs to the non-stream
 	// fold. What a streamed signature becomes instead is the response-level
 	// thought_signatures list below.
 	if reasoning != "" {
-		if s.rsID == "" {
-			s.rsID = s.mint("rs")
-		}
 		item := map[string]any{
 			"id": s.rsID, "type": "reasoning", "role": "assistant", "status": status,
 		}
@@ -486,14 +497,16 @@ func (s *gemToResp) close() []stream.Event {
 			content = append(content, map[string]any{"type": "output_text", "text": reasoning, "annotations": []any{}})
 		}
 		item["content"] = content
-		output = append(output, item)
+		indexed = append(indexed, indexedItem{s.rsIdx, item})
 	}
 	if len(s.images) > 0 {
 		for _, img := range s.images {
-			output = append(output, map[string]any{
+			idx := s.nextIdx
+			s.nextIdx++
+			indexed = append(indexed, indexedItem{idx, map[string]any{
 				"id": s.mint("ig"), "type": "image_generation_call",
 				"status": imageGenerationStatus(s.finish), "result": img,
-			})
+			}})
 		}
 	} else {
 		// The terminal response's message part states the absence itself: the
@@ -505,19 +518,21 @@ func (s *gemToResp) close() []stream.Event {
 		if s.text.Len() == 0 {
 			msgText = nil
 		}
-		output = append(output, map[string]any{
+		indexed = append(indexed, indexedItem{s.msgIdx, map[string]any{
 			"id": s.msgID, "type": "message", "role": "assistant", "status": status,
 			"content": []any{map[string]any{"type": "output_text", "text": msgText, "annotations": []any{}}},
-		})
+		}})
 	}
 	for _, tool := range s.tools {
-		output = append(output, map[string]any{
+		indexed = append(indexed, indexedItem{tool.index, map[string]any{
 			"id": tool.id, "type": "function_call", "status": "completed",
 			"call_id": tool.id, "name": tool.name, "arguments": tool.args,
-		})
+		}})
 	}
-	if output == nil {
-		output = []any{}
+	sort.Slice(indexed, func(i, j int) bool { return indexed[i].idx < indexed[j].idx })
+	output := make([]any, len(indexed))
+	for i, it := range indexed {
+		output[i] = it.item
 	}
 	resp := map[string]any{
 		"id": s.id, "object": "response", "created_at": 0, "model": s.model,
