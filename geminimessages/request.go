@@ -1253,9 +1253,15 @@ func GeminiToMessages(body map[string]any) (map[string]any, error) {
 }
 
 // geminiContentsToMessages folds the contents list into Messages messages.
-// Each content becomes one message whose blocks follow the part order
-// exactly — the forward fold merges consecutive same-role turns, so splitting
-// them back apart would invent boundaries the caller did not write.
+// The target wire requires user and assistant to alternate — the same law the
+// folds from chat and Responses already merge runs under — and the forward
+// geminiContents joins consecutive same-role turns into one content per run,
+// so the reverse folds each same-role run back into ONE message, that run's
+// inverse: the message's blocks follow the part order exactly, the parts of
+// the run's contents joined without reordering or dedupe. A content that
+// contributes no blocks (empty or unspellable parts) folds to no message at
+// all — an empty content array is itself a body the target rejects, and
+// skipping the content lets the role run on either side of it close.
 //
 // A function_call part carries its own id when the source stated one, else a
 // positional id counted over the calls of this fold; a function_response
@@ -1289,12 +1295,22 @@ func geminiContentsToMessages(v any) []any {
 			}
 			blocks = append(blocks, geminiPartToBlocks(pm, lastNameID, &callCount)...)
 		}
-		if blocks == nil {
-			blocks = []any{}
+		if len(blocks) == 0 {
+			// Nothing foldable rode this content: no message, and no empty
+			// content array the target would reject.
+			continue
 		}
 		msgRole := "user"
 		if role == "model" {
 			msgRole = "assistant"
+		}
+		if len(msgs) > 0 {
+			if last, ok := jsonx.AsMap(msgs[len(msgs)-1]); ok && jsonx.GetString(last, "role") == msgRole {
+				// The role run continues: this content's blocks join the
+				// trailing same-role message's content, in part order.
+				last["content"] = append(last["content"].([]any), blocks...)
+				continue
+			}
 		}
 		msgs = append(msgs, map[string]any{"role": msgRole, "content": blocks})
 	}

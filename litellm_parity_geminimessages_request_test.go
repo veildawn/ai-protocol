@@ -733,3 +733,143 @@ func TestGeminiMessagesParityReverseFileData(t *testing.T) {
 		t.Fatalf("url source grew a media_type: %#v", src)
 	}
 }
+
+// gmParityAssertAlternating fails when two neighbouring messages share a
+// role — the adjacent-same-role shape the Messages upstream answers with a
+// 400, which per convert.go's policy (a body that would 400 at the upstream
+// is a conversion bug reported late) is a fold defect, not caller input.
+func gmParityAssertAlternating(t *testing.T, msgs []any) {
+	t.Helper()
+	for i := 1; i < len(msgs); i++ {
+		prev, _ := msgs[i-1].(map[string]any)
+		cur, _ := msgs[i].(map[string]any)
+		if prev["role"] == cur["role"] {
+			t.Fatalf("messages[%d] and messages[%d] are both %v: the target rejects adjacent same-role messages", i-1, i, cur["role"])
+		}
+	}
+}
+
+// Same-role runs in the contents list fold into ONE message per run (2026-10-14).
+// The Messages wire requires user/assistant alternation — the same requirement
+// that made the two existing Messages folds merge runs (chatmessages/request.go
+// "Anthropic requires the wire to alternate" and messagesresponses/from_responses.go
+// "two consecutive assistant messages are a request the target rejects"). This
+// direction has no forward path in the reference (file header above), so there
+// is no parity conflict: the merge rule is the target's own wire law, and the
+// reverse fold now mirrors the forward fold's run-merging (geminimessages
+// request.go geminiContents) instead of re-splitting runs it had joined.
+//
+// The host scenario this guards: many gemini SDKs send each parallel function
+// response as its own user content and append the follow-up prompt as another —
+// a contents run of [model calls, user response, user response+text]. Folding
+// that per-content produced adjacent user messages, a 400 shape at the target.
+func TestGeminiMessagesParityReverseSameRoleRunsMerge(t *testing.T) {
+	got := gmParityFoldBack(t, `{"contents":[
+	    {"role":"model","parts":[{"function_call":{"name":"f","args":{}}},
+	      {"function_call":{"name":"g","args":{}}}]},
+	    {"role":"user","parts":[{"function_response":{"name":"f","response":{"content":"r1"}}}]},
+	    {"role":"user","parts":[{"function_response":{"name":"g","response":{"content":"r2"}}},
+	      {"text":"now continue"}]}],
+	  "generationConfig":{"max_output_tokens":16}}`, 64)
+	want := gmParityDecode(t, `{"messages":[
+	    {"role":"assistant","content":[
+	      {"type":"tool_use","id":"call_0","name":"f","input":{}},
+	      {"type":"tool_use","id":"call_1","name":"g","input":{}}]},
+	    {"role":"user","content":[
+	      {"type":"tool_result","tool_use_id":"call_0","content":"r1"},
+	      {"type":"tool_result","tool_use_id":"call_1","content":"r2"},
+	      {"type":"text","text":"now continue"}]}],
+	  "max_tokens":16}`)
+	gmParityEqual(t, got, want, "parallel tool results")
+	msgs := got["messages"].([]any)
+	if len(msgs) != 2 {
+		t.Fatalf("messages = %d, want exactly 2", len(msgs))
+	}
+	gmParityAssertAlternating(t, msgs)
+}
+
+// The assistant side of the same rule: consecutive model contents join one
+// assistant message with the blocks in part order — text the model streamed
+// before its calls stays ahead of the tool_use blocks (source order, no
+// reordering).
+func TestGeminiMessagesParityReverseModelRunsMerge(t *testing.T) {
+	got := gmParityFoldBack(t, `{"contents":[
+	    {"role":"user","parts":[{"text":"q"}]},
+	    {"role":"model","parts":[{"text":"partial"}]},
+	    {"role":"model","parts":[{"function_call":{"name":"f","args":{}}}]},
+	    {"role":"user","parts":[{"function_response":{"name":"f","response":{"content":"r"}}}]}],
+	  "generationConfig":{"max_output_tokens":16}}`, 64)
+	want := gmParityDecode(t, `{"messages":[
+	    {"role":"user","content":[{"type":"text","text":"q"}]},
+	    {"role":"assistant","content":[{"type":"text","text":"partial"},
+	      {"type":"tool_use","id":"call_0","name":"f","input":{}}]},
+	    {"role":"user","content":[{"type":"tool_result","tool_use_id":"call_0","content":"r"}]}],
+	  "max_tokens":16}`)
+	gmParityEqual(t, got, want, "model run merge")
+	msgs := got["messages"].([]any)
+	if len(msgs) != 3 {
+		t.Fatalf("messages = %d, want exactly 3", len(msgs))
+	}
+	gmParityAssertAlternating(t, msgs)
+}
+
+// A content that contributes no blocks — empty parts, parts absent — folds to
+// no message at all. Keeping it produced an assistant message with an empty
+// content array (the target rejects empty content) AND wedged the two user
+// turns apart so they could not merge; skipping it lets the run close.
+func TestGeminiMessagesParityReverseEmptyPartsSkip(t *testing.T) {
+	for _, body := range []string{`{"contents":[
+	    {"role":"user","parts":[{"text":"a"}]},
+	    {"role":"model","parts":[]},
+	    {"role":"user","parts":[{"text":"b"}]}],
+	  "generationConfig":{"max_output_tokens":16}}`,
+		`{"contents":[
+	    {"role":"user","parts":[{"text":"a"}]},
+	    {"role":"model"},
+	    {"role":"user","parts":[{"text":"b"}]}],
+	  "generationConfig":{"max_output_tokens":16}}`} {
+		got := gmParityFoldBack(t, body, 64)
+		msgs, _ := got["messages"].([]any)
+		if len(msgs) != 1 {
+			t.Fatalf("%s: messages = %d, want the two user contents joined into 1", body, len(msgs))
+		}
+		gmParityEqual(t, msgs[0].(map[string]any)["content"], gmParityDecode(t,
+			`{"b":[{"type":"text","text":"a"},{"type":"text","text":"b"}]}`)["b"], "joined user content")
+		gmParityAssertAlternating(t, msgs)
+		for i, raw := range msgs {
+			if blocks, ok := raw.(map[string]any)["content"].([]any); ok && len(blocks) == 0 {
+				t.Fatalf("messages[%d] has an empty content array", i)
+			}
+		}
+	}
+}
+
+// The library's own roundtrip must not manufacture the 400 shape: the forward
+// fold (reference-pinned above) rewrites one Messages user turn carrying
+// [tool_result, text] into TWO gemini user contents — the tool responses as
+// their own content, the text as the next. Folding that back per-content
+// returned adjacent user messages; the run merge restores the one turn the
+// caller wrote, tool_result first and text after. The tool ids change
+// (toolu_1 -> call_0) because the forward fold drops the id — the reference's
+// own encoding, pinned by the two-hop case above — and the reverse mints
+// positionally per §3.1.
+func TestGeminiMessagesParityReverseRoundTripToolResultText(t *testing.T) {
+	src := `{"model":"m","max_tokens":64,"messages":[
+	    {"role":"user","content":"call the tool"},
+	    {"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"f","input":{}}]},
+	    {"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"r"},
+	      {"type":"text","text":"now continue"}]}]}`
+	g, err := ConvertRequest(Messages, Gemini, []byte(src))
+	if err != nil {
+		t.Fatalf("forward: %v", err)
+	}
+	got := gmParityFoldBack(t, string(g.Body), 64)
+	want := gmParityDecode(t, `{"messages":[
+	    {"role":"user","content":[{"type":"text","text":"call the tool"}]},
+	    {"role":"assistant","content":[{"type":"tool_use","id":"call_0","name":"f","input":{}}]},
+	    {"role":"user","content":[{"type":"tool_result","tool_use_id":"call_0","content":"r"},
+	      {"type":"text","text":"now continue"}]}],
+	  "max_tokens":64}`)
+	gmParityEqual(t, got, want, "roundtrip")
+	gmParityAssertAlternating(t, got["messages"].([]any))
+}
