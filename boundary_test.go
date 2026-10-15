@@ -306,7 +306,7 @@ var boundarySurfaceAllowlist = map[string][]string{
 		"LossStructuredOutput", "LossToolArguments", "LossUnknownContent", "Messages",
 		"MissingRequiredFieldError", "MissingRequiredFieldError.Error", "Normalize",
 		"PeekModel", "PipeStream", "PipeStreamWith", "Responses", "StaticLosses", "StreamOpts", "StreamResult",
-		"UnsupportedParamError", "UnsupportedParamError.Error",
+		"UnsupportedParamError", "UnsupportedParamError.Error", "WriteTerminalError",
 	},
 	"stream": {
 		"Chat", "ClassifyEvent", "Dialect", "Event", "Event.Dialect", "Event.Encode", "EventComplete",

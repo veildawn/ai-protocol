@@ -41,6 +41,14 @@ them.
   `max_tokens`, when the request carries no thinking budget to derive it from),
   `ConversionError` for a body it cannot read, and
   `StreamResult` (`Terminal`/`Truncated`/`InBandErr`) for how a stream ended.
+- `WriteTerminalError` mints a dialect's terminal error frame — the mold only.
+  The verdict, the error type name and the bounded message are the host's: a
+  fold emits nothing of its own for a failed source, so the frame the client
+  must see is the host's, and this is that frame in the client's own wire.
+  Gemini gets an error-object data frame with no sentinel (status fixed at
+  UNAVAILABLE — a mid-flight abort is the host's verdict, not a relayed code),
+  Messages and Responses a named `event: error` frame, Chat the payload plus
+  `[DONE]`.
 - `stream.Framer` incrementally yields complete SSE events from split reads;
   `stream.ClassifyEvent` reports per-event public-protocol facts (prelude,
   content, reasoning, completion, incomplete, failure or unknown). A Chat
