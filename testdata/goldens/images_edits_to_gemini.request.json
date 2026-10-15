@@ -1,0 +1,27 @@
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "inlineData": {
+            "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+            "mimeType": "image/png"
+          }
+        },
+        {
+          "text": "make it blue"
+        }
+      ]
+    }
+  ],
+  "generationConfig": {
+    "candidateCount": 2,
+    "imageConfig": {
+      "aspectRatio": "1:1"
+    },
+    "response_modalities": [
+      "IMAGE",
+      "TEXT"
+    ]
+  }
+}

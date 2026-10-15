@@ -1,0 +1,34 @@
+{
+  "created": 0,
+  "data": [
+    {
+      "b64_json": "aGVsbG8="
+    },
+    {
+      "b64_json": "d29ybGQ="
+    }
+  ],
+  "usage": {
+    "completion_tokens": 1290,
+    "completion_tokens_details": {
+      "image_tokens": 1290,
+      "text_tokens": 0
+    },
+    "input_tokens": 5,
+    "input_tokens_details": {
+      "image_tokens": 0,
+      "text_tokens": 5
+    },
+    "output_tokens": 1290,
+    "output_tokens_details": {
+      "image_tokens": 1290,
+      "text_tokens": 0
+    },
+    "prompt_tokens": 5,
+    "prompt_tokens_details": {
+      "image_tokens": 0,
+      "text_tokens": 5
+    },
+    "total_tokens": 1295
+  }
+}

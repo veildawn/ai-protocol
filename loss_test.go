@@ -87,7 +87,10 @@ func TestConvertRequestWithDropsUnsupportedParams(t *testing.T) {
 // that predate the generateContent wire keep their sets name-for-name, and the
 // six that touch it carry only what that wire cannot express (logprobs and
 // candidate counts fold onto it, so they stop being losses except where the
-// target is Messages or Responses, whose own rows already list them).
+// target is Messages or Responses, whose own rows already list them). The
+// images pair carries the native-param row both ways — the images extras have
+// no wire spelling, and the wire's logprobs have no images spelling — while
+// the candidate count folds to n, so multi-choice is not a loss there.
 func TestStaticLossesNameSets(t *testing.T) {
 	tests := []struct {
 		from, to Dialect
@@ -105,6 +108,8 @@ func TestStaticLossesNameSets(t *testing.T) {
 		{Gemini, Chat, []Loss{LossNativeParam, LossToolArguments, LossUnknownContent}},
 		{Gemini, Messages, []Loss{LossLogprobs, LossMultiChoice, LossNativeParam, LossToolArguments, LossUnknownContent}},
 		{Gemini, Responses, []Loss{LossLogprobs, LossMultiChoice, LossNativeParam, LossToolArguments, LossUnknownContent}},
+		{Images, Gemini, []Loss{LossNativeParam, LossToolArguments, LossUnknownContent}},
+		{Gemini, Images, []Loss{LossLogprobs, LossNativeParam, LossToolArguments, LossUnknownContent}},
 	}
 	for _, tc := range tests {
 		got := StaticLosses(tc.from, tc.to)
@@ -157,5 +162,46 @@ func TestBodyLossesGeminiCarriesTheFordableParams(t *testing.T) {
 		if got[loss] {
 			t.Fatalf("BodyLosses(chat→gemini) reported %q for a body the wire can carry: %v", loss, got)
 		}
+	}
+}
+
+// The images pair's native-param rows: the images extras the wire cannot
+// spell fire in both refusal paths, and the wire-side knobs that do not fold
+// fire on the way back — while the ones that do fold stay silent.
+func TestBodyLossesImagesPair(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"images quality", `{"model":"m","prompt":"x","quality":"high"}`},
+		{"images response_format", `{"model":"m","prompt":"x","response_format":"b64_json"}`},
+		{"images background", `{"model":"m","prompt":"x","background":"transparent"}`},
+		{"images edits mask", `{"model":"m","prompt":"x","image":[{"b64_json":"AA"}],"mask":"m"}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := BodyLosses(Images, Gemini, []byte(tc.body), ConvertOptions{})
+			if !got[LossNativeParam] {
+				t.Fatalf("BodyLosses(images→gemini) missing native_param: %v", got)
+			}
+		})
+	}
+
+	native := []byte(`{"contents":[{"role":"user","parts":[{"text":"x"}]}],"safetySettings":[{"category":"H","threshold":"B"}]}`)
+	if got := BodyLosses(Gemini, Images, native, ConvertOptions{}); !got[LossNativeParam] {
+		t.Fatalf("BodyLosses(gemini→images) missing native_param: %v", got)
+	}
+
+	// The candidate count folds to n and the generation image config folds to
+	// a size, so neither reports a loss on this pair.
+	folds := []byte(`{"contents":[{"role":"user","parts":[{"text":"x"}]}],"generationConfig":{"imageConfig":{"aspectRatio":"1:1"},"candidateCount":2}}`)
+	got := BodyLosses(Gemini, Images, folds, ConvertOptions{})
+	if got[LossNativeParam] {
+		t.Fatalf("BodyLosses(gemini→images) reported native_param for a body the images wire can carry: %v", got)
+	}
+	nBody := []byte(`{"model":"m","prompt":"x","n":2}`)
+	got = BodyLosses(Images, Gemini, nBody, ConvertOptions{})
+	if got[LossNativeParam] || got[LossMultiChoice] {
+		t.Fatalf("BodyLosses(images→gemini) reported %v for a body the wire can carry", got)
 	}
 }

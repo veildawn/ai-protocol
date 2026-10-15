@@ -13,7 +13,7 @@ import (
 )
 
 // This file is the codec's border, written as a test rather than as a
-// convention. ai-protocol is a PUBLIC DIALECT CODEC and nothing else: four
+// convention. ai-protocol is a PUBLIC DIALECT CODEC and nothing else: five
 // public dialects, request/response/SSE conversion, explicit error semantics.
 // It does not speak HTTP, does not know a vendor, and carries no routing,
 // billing, account or quota policy. Those rules are only worth anything if a
@@ -174,7 +174,7 @@ func TestImportRulesCatchWhatTheyClaim(t *testing.T) {
 	}
 }
 
-// Exactly four public dialects. A fifth would be a new wire format the codec
+// Exactly five public dialects. A new one is a new wire format the codec
 // claims to understand — a boundary decision, not a rename.
 func TestDialectVocabularyIsClosed(t *testing.T) {
 	files, _ := parseModule(t, false)
@@ -207,7 +207,7 @@ func TestDialectVocabularyIsClosed(t *testing.T) {
 			}
 		}
 	}
-	want := map[string]string{"Chat": "chat", "Messages": "messages", "Responses": "responses", "Gemini": "gemini"}
+	want := map[string]string{"Chat": "chat", "Messages": "messages", "Responses": "responses", "Gemini": "gemini", "Images": "images"}
 	if len(got) != len(want) {
 		t.Fatalf("dialect constants are %v, want exactly %v", got, want)
 	}
@@ -223,12 +223,12 @@ func TestDialectVocabularyIsClosed(t *testing.T) {
 // scan covers non-test sources only, so a fixture may still carry a model id
 // like "claude-3" without tripping it.
 //
-// "gemini" is deliberately absent: it is the NAME of the fourth public dialect
-// (its generateContent wire), so the word names a wire format this codec
-// converts, not a vendor privilege. That narrowing is itself a boundary
-// decision — the dialect constant, the README contract and this list changed
-// together. The deployment and studio spellings of that wire remain unnamed
-// here, and their words stay in the list.
+// "gemini" is deliberately absent: it is the NAME of a public dialect (its
+// generateContent wire), so the word names a wire format this codec converts,
+// not a vendor privilege. That narrowing is itself a boundary decision — the
+// dialect constant, the README contract and this list changed together. The
+// deployment and studio spellings of that wire remain unnamed here, and their
+// words stay in the list.
 var vendorVocabulary = []string{
 	"openai.com", "anthropic.com", "googleapis.com",
 	"claude", "gpt", "qwen", "deepseek", "grok", "mistral",
@@ -287,6 +287,9 @@ var boundarySurfaceAllowlist = map[string][]string{
 		"GeminiResponseToResponses", "GeminiToResponses", "PipeGeminiToResponses", "PipeResponsesToGemini",
 		"ResponsesResponseToGemini", "ResponsesToGemini", "StreamOpts",
 	},
+	"imagesgemini": {
+		"GeminiResponseToImages", "GeminiToImages", "ImagesResponseToGemini", "ImagesToGemini",
+	},
 	"internal/cerr": {"UnsupportedParam", "UnsupportedParam.Error"},
 	"internal/dialectvocab": {
 		"AnthropicHostedTools", "DefaultMaxTokens", "IsAnthropicHostedTool",
@@ -298,7 +301,7 @@ var boundarySurfaceAllowlist = map[string][]string{
 	"protocol": {
 		"BodyLosses", "Chat", "ConversionError", "ConversionError.Error", "ConversionError.Unwrap",
 		"ConvertOptions", "ConvertRequest", "ConvertRequestWith", "ConvertResponse", "ConvertResponseWith",
-		"Converted", "Dialect", "Dialect.String", "Gemini", "Loss", "LossFileReference", "LossLogitBias", "LossLogprobs",
+		"Converted", "Dialect", "Dialect.String", "Gemini", "Images", "Loss", "LossFileReference", "LossLogitBias", "LossLogprobs",
 		"LossMultiChoice", "LossNativeParam", "LossPenaltyControls", "LossSeed", "LossSet", "LossSet.Add", "LossSet.Union",
 		"LossStructuredOutput", "LossToolArguments", "LossUnknownContent", "Messages",
 		"MissingRequiredFieldError", "MissingRequiredFieldError.Error", "Normalize",

@@ -1,13 +1,15 @@
 # ai-protocol
 
 A **public dialect codec**: it converts JSON bodies and SSE streams between the
-four public LLM dialects, and it does nothing else.
+public LLM dialects, and it does nothing else.
 
 - `chat` — OpenAI Chat Completions (`/v1/chat/completions`)
 - `messages` — Anthropic Messages (`/v1/messages`)
 - `responses` — OpenAI Responses (`/v1/responses`)
 - `gemini` — the generateContent wire (`contents`/`parts`, `candidates`,
   `finishReason`)
+- `images` — the image-generation wire (`prompt`/`n`/`size` requests, edits
+  with `image[]`, `data[]` of `b64_json` responses)
 
 Mappings follow [LiteLLM](https://github.com/BerriAI/litellm) **v1.100.1** (see
 [NOTICE](NOTICE)).
@@ -20,8 +22,11 @@ them.
 
 **What it is**
 
-- Exactly four public dialects, request/response/SSE conversion between any
-  pair of them, as pure functions.
+- Five public dialects. The text dialects (`chat`, `messages`, `responses`,
+  `gemini`) convert between any pair of them, request/response/SSE;
+  `images` pairs with `gemini` on request/response bodies only — image
+  generation does not stream, so the pair has no SSE fold. All conversions are
+  pure functions.
 - `PeekModel` reads the top-level `model` member without a full decode, for the
   hosts that route on it before any conversion runs. A gemini body has no
   `model` member (the name rides the URL there), so the peek answers `("", nil)`
@@ -29,7 +34,7 @@ them.
 - `Normalize` accepts the dialect names plus the gateway spellings `openai` and
   `anthropic`. `gemini` has no alias: the deployment and studio spellings of
   that wire are not public dialect names, so the dialect's own name is the only
-  one that normalizes.
+  one that normalizes. `images` has no alias either.
 - Explicit error semantics: `UnsupportedParamError` for a parameter the target
   dialect cannot carry, `MissingRequiredFieldError` for a field the target
   dialect requires that the caller declined to supply (Messages folds and
@@ -58,7 +63,7 @@ them.
 **Where it sits**
 
 ```
-client public dialect        openai / anthropic / responses / gemini, as the client speaks it
+client public dialect        openai / anthropic / responses / gemini / images, as the client speaks it
         ↓
 ai-protocol                  public ↔ public conversion, pure functions
         ↓

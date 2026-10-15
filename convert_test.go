@@ -1261,6 +1261,66 @@ func TestNormalizeGeminiHasNoAliases(t *testing.T) {
 	}
 }
 
+func TestImagesPassthroughKeepsBytes(t *testing.T) {
+	body := []byte(`{"model":"m","prompt":"a red apple","n":1,"size":"1024x1024"}`)
+	got, err := ConvertRequest(Images, Images, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got.Body, body) {
+		t.Fatalf("passthrough re-encoded body")
+	}
+	if got.Model != "m" {
+		t.Fatalf("model=%s", got.Model)
+	}
+	out, err := ConvertResponse(Images, Images, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(out, body) {
+		t.Fatalf("response passthrough re-encoded")
+	}
+}
+
+// The dialect's own name normalizes; the adapter spellings of the same image
+// wire are not public dialect names and must not.
+func TestNormalizeImagesHasNoAliases(t *testing.T) {
+	if d, ok := Normalize("images"); !ok || d != Images {
+		t.Fatalf("images -> %s, %v", d, ok)
+	}
+	for _, not := range []string{"image", "imagen", "image_gen", "imageGen"} {
+		if _, ok := Normalize(not); ok {
+			t.Fatalf("%q normalized — the adapter spellings are not dialect names", not)
+		}
+	}
+}
+
+// The pair's error semantics: a parameter the target cannot spell is refused
+// with UnsupportedParamError until the caller opts into omission, and the
+// images pair has no stream fold — the pipe names the unsupported conversion
+// instead of guessing one.
+func TestImagesGeminiErrorSemantics(t *testing.T) {
+	body := []byte(`{"model":"m","prompt":"x","quality":"high"}`)
+	_, err := ConvertRequest(Images, Gemini, body)
+	var unsupported UnsupportedParamError
+	if !errors.As(err, &unsupported) || unsupported.Param != "quality" {
+		t.Fatalf("err = %v, want UnsupportedParamError{quality}", err)
+	}
+	got, err := ConvertRequestWith(Images, Gemini, body, ConvertOptions{DropParams: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(got.Body), "quality") {
+		t.Fatalf("dropped param survived: %s", got.Body)
+	}
+
+	var pipeErr error
+	_, pipeErr = PipeStream(Images, Gemini, &strings.Builder{}, strings.NewReader(""), StreamOpts{})
+	if pipeErr == nil || !strings.Contains(pipeErr.Error(), "unsupported stream conversion images -> gemini") {
+		t.Fatalf("pipe err = %v, want unsupported stream conversion", pipeErr)
+	}
+}
+
 // A fold into Messages still needs that dialect's required ceiling. The gemini
 // wire derives it from the generation config when one is stated (its own
 // max_output_tokens, or a thinking budget plus the default ceiling); with

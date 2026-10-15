@@ -11,6 +11,7 @@ import (
 	"github.com/veildawn/ai-protocol/geminichat"
 	"github.com/veildawn/ai-protocol/geminimessages"
 	"github.com/veildawn/ai-protocol/geminiresponses"
+	"github.com/veildawn/ai-protocol/imagesgemini"
 	"github.com/veildawn/ai-protocol/internal/cerr"
 	"github.com/veildawn/ai-protocol/internal/jsonx"
 	"github.com/veildawn/ai-protocol/messagesresponses"
@@ -113,6 +114,10 @@ func convertRequest(from, to Dialect, body []byte, opts ConvertOptions) (Convert
 		out, err = geminiresponses.ResponsesToGemini(obj, dropParams)
 	case src == Gemini && dst == Responses:
 		out, err = geminiresponses.GeminiToResponses(obj)
+	case src == Images && dst == Gemini:
+		out, err = imagesgemini.ImagesToGemini(obj, dropParams)
+	case src == Gemini && dst == Images:
+		out, err = imagesgemini.GeminiToImages(obj)
 	default:
 		return Converted{}, fmt.Errorf("unsupported conversion %s -> %s", src, dst)
 	}
@@ -191,6 +196,10 @@ func ConvertResponseWith(from, to Dialect, body []byte, opts ConvertOptions) ([]
 		out = geminiresponses.ResponsesResponseToGemini(obj)
 	case src == Gemini && dst == Responses:
 		out = geminiresponses.GeminiResponseToResponses(obj)
+	case src == Images && dst == Gemini:
+		out = imagesgemini.ImagesResponseToGemini(obj)
+	case src == Gemini && dst == Images:
+		out = imagesgemini.GeminiResponseToImages(obj)
 	default:
 		return nil, fmt.Errorf("unsupported conversion %s -> %s", src, dst)
 	}

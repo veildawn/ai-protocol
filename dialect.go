@@ -5,7 +5,8 @@ import "strings"
 // Dialect is a public wire format. Values match the plan names; Normalize also
 // accepts the gateway spellings openai / anthropic. Gemini has no alias: the
 // deployment and studio spellings of that wire are not public dialect names,
-// so only the dialect's own name normalizes.
+// so only the dialect's own name normalizes. Images has no alias either, for
+// the same reason.
 type Dialect string
 
 const (
@@ -13,6 +14,7 @@ const (
 	Messages  Dialect = "messages"
 	Responses Dialect = "responses"
 	Gemini    Dialect = "gemini"
+	Images    Dialect = "images"
 )
 
 func Normalize(s string) (Dialect, bool) {
@@ -25,6 +27,8 @@ func Normalize(s string) (Dialect, bool) {
 		return Responses, true
 	case "gemini":
 		return Gemini, true
+	case "images":
+		return Images, true
 	default:
 		return "", false
 	}

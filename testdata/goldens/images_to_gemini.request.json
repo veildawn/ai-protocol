@@ -1,0 +1,21 @@
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "a red apple on a table"
+        }
+      ]
+    }
+  ],
+  "generationConfig": {
+    "candidateCount": 2,
+    "imageConfig": {
+      "aspectRatio": "1:1"
+    },
+    "response_modalities": [
+      "IMAGE",
+      "TEXT"
+    ]
+  }
+}

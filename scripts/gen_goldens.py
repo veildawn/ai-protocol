@@ -75,6 +75,7 @@ def main() -> int:
     write("responses_to_chat.request.json", responses_as_chat)
 
     write_gemini_goldens(chat_req, responses_as_chat)
+    write_images_goldens()
     return 0
 
 
@@ -196,6 +197,104 @@ def write_gemini_goldens(messages_as_chat: dict, responses_as_chat: dict) -> Non
         raw_response=raw,
     ).model_dump(exclude_none=True)
     write("gemini_to_chat.response.json", scrub_volatile(chat_out))
+
+
+def write_images_goldens() -> None:
+    """Generate the images-dialect goldens through the reference's own image
+    adapters.
+
+    Unlike the gemini chat goldens above, these are no two-hop composition:
+    the reference ships native images<->gemini adapters
+    (llms/gemini/image_generation, llms/gemini/image_edit), so each golden is
+    one adapter call. The response golden's `created` is the handler's wall
+    clock, scrubbed to the codec's zero by scrub_volatile like any volatile.
+    """
+    import base64
+
+    import httpx
+    from litellm.llms.gemini.image_edit.transformation import GeminiImageEditConfig
+    from litellm.llms.gemini.image_generation.transformation import GoogleImageGenConfig
+    from litellm.types.utils import ImageResponse
+
+    model = "gemini-2.5-flash-image"
+    # A 1x1 PNG, the smallest payload that names its type by magic bytes.
+    png1x1 = (
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAE"
+        "hQGAhKmMIQAAAABJRU5ErkJggg=="
+    )
+
+    gen = GoogleImageGenConfig()
+    opt = gen.map_openai_params(
+        non_default_params={"n": 2, "size": "1024x1024"},
+        optional_params={},
+        model=model,
+        drop_params=False,
+    )
+    write(
+        "images_to_gemini.request.json",
+        gen.transform_image_generation_request(
+            model=model,
+            prompt="a red apple on a table",
+            optional_params=opt,
+            litellm_params={},
+            headers={},
+        ),
+    )
+
+    edit = GeminiImageEditConfig()
+    opt_edit = edit.map_openai_params(
+        image_edit_optional_params={"n": 2, "size": "1024x1024"},
+        model=model,
+        drop_params=False,
+    )
+    body, _ = edit.transform_image_edit_request(
+        model=model,
+        prompt="make it blue",
+        image=[base64.b64decode(png1x1)],
+        image_edit_optional_request_params=opt_edit,
+        litellm_params={},
+        headers={},
+    )
+    write("images_edits_to_gemini.request.json", body)
+
+    gemini_resp = {
+        "candidates": [
+            {
+                "content": {
+                    "role": "model",
+                    "parts": [
+                        {"text": "Here is your image."},
+                        {"inlineData": {"mimeType": "image/png", "data": "aGVsbG8="}},
+                        {"inlineData": {"mimeType": "image/png", "data": "d29ybGQ="}},
+                    ],
+                },
+                "finishReason": "STOP",
+                "index": 0,
+            }
+        ],
+        "usageMetadata": {
+            "promptTokenCount": 5,
+            "candidatesTokenCount": 1290,
+            "totalTokenCount": 1295,
+            "promptTokensDetails": [{"modality": "TEXT", "tokenCount": 5}],
+            "candidatesTokensDetails": [{"modality": "IMAGE", "tokenCount": 1290}],
+        },
+        "responseId": "resp-1",
+    }
+    raw = httpx.Response(
+        200, json=gemini_resp, request=httpx.Request("POST", "https://example.test")
+    )
+    out = gen.transform_image_generation_response(
+        model=model,
+        raw_response=raw,
+        model_response=ImageResponse(),
+        logging_obj=None,
+        request_data={},
+        optional_params={},
+        litellm_params={},
+        encoding=None,
+    )
+    write("gemini_to_images.response.json", scrub_volatile(out.model_dump(exclude_none=True)))
 
 
 def scrub_volatile(obj):

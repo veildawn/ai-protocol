@@ -4,3 +4,7 @@ Copyright (c) 2023 Berri AI
 Licensed under the MIT License.
 
 Spec pin: LiteLLM v1.100.1
+
+The images↔gemini mappings come from the same pin's Gemini image adapters
+(llms/gemini/image_generation, llms/gemini/image_edit); the reverse directions
+are the codec's documented inverses of those mappings.

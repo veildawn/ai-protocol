@@ -79,10 +79,31 @@ func StaticLosses(from, to Dialect) LossSet {
 		// Only the json_object body form is lost here (the fold has a branch
 		// for json_schema alone); see bodyHasStructuredOutput.
 		return out.Add(LossLogitBias, LossLogprobs, LossMultiChoice, LossFileReference, LossStructuredOutput)
+	// The images wire pairs only with the generateContent wire, so its branch
+	// must be tested first: every images direction also matches the Gemini
+	// test below and would otherwise fall into that switch's rows.
+	case src == Images || dst == Images:
+		return out.Add(imagesLosses(src, dst)...)
 	case src == Gemini || dst == Gemini:
 		return out.Add(geminiLosses(src, dst)...)
 	default:
 		return out.Add(LossLogitBias, LossLogprobs, LossMultiChoice)
+	}
+}
+
+// imagesLosses lists what one conversion touching the images wire can lose
+// beyond the two universal predicates. The images request's own extras —
+// quality, response_format, background, and the edits-only mask — have no
+// spelling on the generateContent wire, so a body carrying any of them loses
+// it in both refusal paths. On the way back, the wire's logprobs knobs have no
+// images spelling; the candidate count does (it folds to n), so multi-choice
+// is not a loss here.
+func imagesLosses(src, dst Dialect) []Loss {
+	switch {
+	case src == Images && dst == Gemini:
+		return []Loss{LossNativeParam}
+	default: // src == Gemini && dst == Images
+		return []Loss{LossLogprobs, LossNativeParam}
 	}
 }
 
@@ -181,6 +202,15 @@ func bodyHasNativeParam(payload map[string]any, src, dst Dialect) bool {
 		// reasoning.effort folds onto the wire's thinking config; the summary
 		// it may carry does not, so a reasoning key is a native-param loss.
 		return present("metadata", "user", "context_management", "reasoning")
+	case src == Gemini && dst == Images:
+		// The images wire can carry one thing the other targets cannot: the
+		// generation image config folds to a size, so unlike the rows below it
+		// is not a native-param loss on this direction.
+		return geminiBodyHasNativeParamExceptImageConfig(payload)
+	case src == Images:
+		// The images parameters the generateContent wire cannot spell; the
+		// edits-only mask rides the same refusal set either way.
+		return present("quality", "response_format", "mask", "background")
 	case src == Gemini:
 		return geminiBodyHasNativeParam(payload)
 	default:
@@ -198,6 +228,40 @@ func geminiBodyHasNativeParam(payload map[string]any) bool {
 	}
 	if gc, _ := payload["generationConfig"].(map[string]any); gc != nil {
 		for _, key := range []string{"speechConfig", "imageConfig", "responseFormat", "mediaResolution"} {
+			if payloadPresent(gc, key) {
+				return true
+			}
+		}
+	}
+	if tc, _ := payload["toolConfig"].(map[string]any); tc != nil {
+		if payloadPresent(tc, "includeServerSideToolInvocations") {
+			return true
+		}
+	}
+	tools, _ := payload["tools"].([]any)
+	for _, raw := range tools {
+		tool, _ := raw.(map[string]any)
+		if tool == nil {
+			continue
+		}
+		for key := range tool {
+			if key != "function_declarations" && key != "googleSearch" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// geminiBodyHasNativeParamExceptImageConfig is the native-only surface as seen
+// from the images target: the same rows as above minus generationConfig
+// imageConfig, which folds to the images request's size.
+func geminiBodyHasNativeParamExceptImageConfig(payload map[string]any) bool {
+	if payloadPresent(payload, "safetySettings") || payloadPresent(payload, "cachedContent") {
+		return true
+	}
+	if gc, _ := payload["generationConfig"].(map[string]any); gc != nil {
+		for _, key := range []string{"speechConfig", "responseFormat", "mediaResolution"} {
 			if payloadPresent(gc, key) {
 				return true
 			}
