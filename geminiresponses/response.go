@@ -287,7 +287,7 @@ func parseCandidate(cm map[string]any) candidateParts {
 		if hasText && thought {
 			out.reasoning += text
 			block := map[string]any{"type": "thinking", "thinking": text}
-			if sig, ok := pm["thoughtSignature"]; ok && sig != nil {
+			if sig := partThoughtSignature(pm); sig != "" {
 				block["signature"] = sig
 			}
 			out.blocks = append(out.blocks, block)
@@ -308,7 +308,7 @@ func parseCandidate(cm map[string]any) candidateParts {
 				id:        jsonx.GetString(fc, "id"),
 				name:      jsonx.GetString(fc, "name"),
 				arguments: dumpArgsJSON(fc["args"]),
-				signature: jsonx.GetString(pm, "thoughtSignature"),
+				signature: partThoughtSignature(pm),
 			}
 			out.calls = append(out.calls, call)
 			continue

@@ -135,7 +135,7 @@ func geminiCandidateBlocks(c map[string]any) (blocks []any, hasCalls bool) {
 				base, sig = stripThoughtSignature(id)
 				id = base
 			}
-			if s := jsonx.GetString(p, "thoughtSignature"); s != "" {
+			if s := partThoughtSignature(p); s != "" {
 				sig = s
 			}
 			if id == "" {
@@ -181,12 +181,13 @@ func geminiCandidateBlocks(c map[string]any) (blocks []any, hasCalls bool) {
 			s := jsonx.String(raw)
 			thought, _ := jsonx.Bool(p["thought"])
 			if thought {
-				sig, hasSig := "", false
-				if v, present := p["thoughtSignature"]; present && v != nil {
-					sig = jsonx.String(v)
-					hasSig = true
-				}
-				thoughts = append(thoughts, thoughtBlock{s, sig, hasSig})
+				// The signature key rides only a real signature: an absent
+				// one is what makes the Messages fold treat the block as
+				// unsigned and replay it as plain text, which is exactly the
+				// loss this fold exists to prevent. Either spelling counts as
+				// present.
+				sig := partThoughtSignature(p)
+				thoughts = append(thoughts, thoughtBlock{s, sig, sig != ""})
 				continue
 			}
 			if isAudioDataURL(s) {

@@ -1364,7 +1364,7 @@ func geminiPartToBlocks(pm map[string]any, lastNameID map[string]string, callCou
 	}
 	if text, present := pm["text"]; present {
 		if thought, _ := jsonx.Bool(pm["thought"]); thought {
-			sig := jsonx.GetString(pm, "thoughtSignature")
+			sig := partThoughtSignature(pm)
 			thinking := jsonx.GetString(pm, "text")
 			if thinking == "" && sig == "" {
 				// A thought part with neither text nor signature holds nothing
@@ -1574,3 +1574,18 @@ func serviceTierFromGemini(s string) string {
 // place of a thought signature a client could not preserve — the spelling the
 // official hub client sends for a replayed call whose signature it never saw.
 const skipThoughtSignature = "skip_thought_signature_validator"
+
+// partThoughtSignature reads a part's thought signature in either spelling.
+// Google's own wire spells the member BOTH ways — the plugin's reader notes
+// "thoughtSignature comes and goes" — and it keeps both keys in the map, so a
+// reader that consults one spelling alone silently drops the signature half
+// the time. A dropped signature is not a cosmetic loss: it rides the call id
+// the client replays, and an unsigned replayed call is refused by the upstream
+// on the NEXT request. Mirrors the plugin's own part_thought_signature, which
+// checks the same two keys.
+func partThoughtSignature(pm map[string]any) string {
+	if s := jsonx.GetString(pm, "thoughtSignature"); s != "" {
+		return s
+	}
+	return jsonx.GetString(pm, "thought_signature")
+}

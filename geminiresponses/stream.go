@@ -561,7 +561,7 @@ func parseFrame(cand map[string]any) frameFacts {
 		if !ok {
 			continue
 		}
-		if sig := jsonx.GetString(pm, "thoughtSignature"); sig != "" {
+		if sig := partThoughtSignature(pm); sig != "" {
 			f.sigs = append(f.sigs, sig)
 		}
 		text, hasText := pm["text"].(string)
@@ -569,7 +569,7 @@ func parseFrame(cand map[string]any) frameFacts {
 		if hasText && thought {
 			f.reasoning += text
 			block := map[string]any{"type": "thinking", "thinking": text}
-			if sig, ok := pm["thoughtSignature"]; ok && sig != nil {
+			if sig := partThoughtSignature(pm); sig != "" {
 				block["signature"] = sig
 			}
 			f.blocks = append(f.blocks, block)
@@ -587,7 +587,7 @@ func parseFrame(cand map[string]any) frameFacts {
 				id:        jsonx.GetString(fc, "id"),
 				name:      jsonx.GetString(fc, "name"),
 				arguments: dumpArgsJSON(fc["args"]),
-				signature: jsonx.GetString(pm, "thoughtSignature"),
+				signature: partThoughtSignature(pm),
 			})
 			continue
 		}

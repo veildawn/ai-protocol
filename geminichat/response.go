@@ -191,7 +191,7 @@ type geminiPartsFold struct {
 // onto the content; a thought part accumulates onto the reasoning and a
 // thinking block; images, audio and calls each ride their own member.
 func (f *geminiPartsFold) feed(pm map[string]any, toolIndex, callSeq *int) {
-	sig := jsonx.GetString(pm, "thoughtSignature")
+	sig := partThoughtSignature(pm)
 	if sig != "" {
 		f.sigs = append(f.sigs, sig)
 	}

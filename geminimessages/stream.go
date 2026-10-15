@@ -413,7 +413,7 @@ func (s *geminiToMessagesState) feed(obj map[string]any) []stream.Event {
 				args = a
 			}
 			calls = append(calls, streamedCall{
-				block: s.toolCallBlock(fc, jsonx.GetString(p, "thoughtSignature")),
+				block: s.toolCallBlock(fc, partThoughtSignature(p)),
 				args:  args,
 			})
 			continue
