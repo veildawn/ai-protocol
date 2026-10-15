@@ -73,15 +73,15 @@ func TestGeminiChatParityChatToGeminiRequest(t *testing.T) {
 		// function_response under {"content": ...} (factory.py:1465-1500,
 		// name resolved from the call by tool_call_id factory.py:1443-1449).
 		{"tool history", `{"messages":[{"role":"user","content":"weather?"},{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\": \"Boston\"}"}}]},{"role":"tool","tool_call_id":"call_1","content":"sunny"}]}`,
-			`{"contents":[{"role":"user","parts":[{"text":"weather?"}]},{"role":"model","parts":[{"function_call":{"name":"get_weather","args":{"city":"Boston"}}}]},{"role":"user","parts":[{"function_response":{"name":"get_weather","response":{"content":"sunny"}}}]}]}`},
+			`{"contents":[{"role":"user","parts":[{"text":"weather?"}]},{"role":"model","parts":[{"function_call":{"name":"get_weather","args":{"city":"Boston"}},"thoughtSignature":"skip_thought_signature_validator"}]},{"role":"user","parts":[{"function_response":{"name":"get_weather","response":{"content":"sunny"}}}]}]}`},
 		// Tool result whose text is a JSON object rides as the response itself
 		// (factory.py:1465-1476); empty arguments string -> placeholder object
 		// (factory.py:1123-1128); a list result contributes its text plus inline
 		// media inside the function response (transformation.py:725-849).
 		{"tool result json", `{"messages":[{"role":"user","content":"x"},{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}}]},{"role":"tool","tool_call_id":"c1","content":"{\"a\": 1}"}]}`,
-			`{"contents":[{"role":"user","parts":[{"text":"x"}]},{"role":"model","parts":[{"function_call":{"args":{},"name":"f"}}]},{"role":"user","parts":[{"function_response":{"name":"f","response":{"a":1}}}]}]}`},
+			`{"contents":[{"role":"user","parts":[{"text":"x"}]},{"role":"model","parts":[{"function_call":{"args":{},"name":"f"},"thoughtSignature":"skip_thought_signature_validator"}]},{"role":"user","parts":[{"function_response":{"name":"f","response":{"a":1}}}]}]}`},
 		{"tool result media list", `{"messages":[{"role":"user","content":"x"},{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":""}}]},{"role":"tool","tool_call_id":"c1","content":[{"type":"text","text":"see"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAB"}}]}]}`,
-			`{"contents":[{"role":"user","parts":[{"text":"x"}]},{"role":"model","parts":[{"function_call":{"args":{"type":"object"},"name":"f"}}]},{"role":"user","parts":[{"function_response":{"name":"f","parts":[{"inline_data":{"data":"AAAB","mime_type":"image/png"}}],"response":{"content":"see"}}}]}]}`},
+			`{"contents":[{"role":"user","parts":[{"text":"x"}]},{"role":"model","parts":[{"function_call":{"args":{"type":"object"},"name":"f"},"thoughtSignature":"skip_thought_signature_validator"}]},{"role":"user","parts":[{"function_response":{"name":"f","parts":[{"inline_data":{"data":"AAAB","mime_type":"image/png"}}],"response":{"content":"see"}}}]}]}`},
 		// reasoning_effort=high + json_schema with strict stripped recursively
 		// (vertex_and_google_ai_studio_gemini.py:768-790, 1155-1177;
 		// litellm/utils.py:3790-3808).
@@ -536,11 +536,17 @@ func TestGeminiChatParityGeminiToChatDropsNativeFields(t *testing.T) {
 // the subset whose reference round-trip is exact - the lossy ones are the
 // next test's subject.
 func TestGeminiChatParityRequestRoundTrip(t *testing.T) {
+	// An unsigned replayed call gains the upstream's skip marker on the way
+	// back: the forward fold cannot send a functionCall part with no
+	// thoughtSignature (the target refuses it, INVALID_ARGUMENT). The
+	// round-trip corpus carries one such call, so the expectation for that
+	// body is the marker rather than the original bytes.
+	skipMarker := `{"contents":[{"role":"user","parts":[{"text":"q"}]},{"role":"model","parts":[{"function_call":{"name":"f","args":{"a":1}},"thoughtSignature":"skip_thought_signature_validator"}]},{"role":"user","parts":[{"function_response":{"name":"f","response":{"content":"r"}}}]}]}`
 	bodies := []string{
 		`{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}`,
 		`{"contents":[{"role":"user","parts":[{"text":"q"}]}],"system_instruction":{"parts":[{"text":"be brief"}]}}`,
 		`{"contents":[{"role":"user","parts":[{"text":"q"}]},{"role":"model","parts":[{"text":"a"}]}]}`,
-		`{"contents":[{"role":"user","parts":[{"text":"q"}]},{"role":"model","parts":[{"function_call":{"name":"f","args":{"a":1}}}]},{"role":"user","parts":[{"function_response":{"name":"f","response":{"content":"r"}}}]}]}`,
+		skipMarker,
 		`{"contents":[{"role":"user","parts":[{"text":"q"}]}],"tools":[{"function_declarations":[{"name":"f1","parameters":{"type":"object"}},{"name":"f2"}]}]}`,
 		`{"contents":[{"role":"user","parts":[{"text":"q"}]}],"tools":[{"googleSearch":{}}]}`,
 		`{"contents":[{"role":"user","parts":[{"text":"q"}]}],"toolConfig":{"functionCallingConfig":{"mode":"NONE"}}}`,

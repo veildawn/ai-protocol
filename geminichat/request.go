@@ -42,6 +42,29 @@ var geminiRefusedParams = map[string]struct{}{
 // wire, so the fold lifts it off onto the part it signs.
 const thoughtSignatureSeparator = "__thought__"
 
+// skipThoughtSignature is the marker the upstream's own validator accepts in
+// place of a thought signature a client could not preserve — the spelling the
+// official hub client sends for a replayed call whose signature it never saw.
+// A missing signature and a borrowed one are both refused (INVALID_ARGUMENT,
+// verified against the live upstream), so the fallback is the sentinel or
+// nothing.
+const skipThoughtSignature = "skip_thought_signature_validator"
+
+// partThoughtSignature reads a part's thought signature in either spelling.
+// Google's own wire spells the member BOTH ways — the plugin's reader notes
+// "thoughtSignature comes and goes" — so a reader that consults one spelling
+// alone silently drops the signature half the time. A dropped signature is
+// not a cosmetic loss: it rides the tool call id the client replays, and an
+// unsigned replayed call is refused by the upstream on the NEXT request.
+// Mirrors the plugin's own part_thought_signature, which checks the same two
+// keys.
+func partThoughtSignature(pm map[string]any) string {
+	if s := jsonx.GetString(pm, "thoughtSignature"); s != "" {
+		return s
+	}
+	return jsonx.GetString(pm, "thought_signature")
+}
+
 // ChatToGemini folds a chat request body into the target dialect's
 // generateContent request body.
 //
@@ -768,9 +791,15 @@ func functionCallPart(fn map[string]any, tm map[string]any) (map[string]any, err
 	if sig == "" {
 		sig = functionCallThoughtSignature(fn)
 	}
-	if sig != "" {
-		part["thoughtSignature"] = sig
+	if sig == "" {
+		// The target refuses a replayed functionCall part without a
+		// thoughtSignature (INVALID_ARGUMENT, "Function call is missing a
+		// thought_signature in functionCall parts") and validates the value,
+		// so a client that preserved none has nothing valid to send: the part
+		// rides the upstream's own skip marker. A preserved signature wins.
+		sig = skipThoughtSignature
 	}
+	part["thoughtSignature"] = sig
 	return part, nil
 }
 
@@ -1666,7 +1695,7 @@ func geminiContentsToChatMessages(contents []any) []any {
 			if !ok {
 				continue
 			}
-			sig := jsonx.GetString(pm, "thoughtSignature")
+			sig := partThoughtSignature(pm)
 			if sig != "" {
 				sigs = append(sigs, sig)
 			}

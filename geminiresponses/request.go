@@ -15,6 +15,29 @@ import (
 // carry a thought signature across dialects that have no field for it.
 const thoughtSeparator = "__thought__"
 
+// skipThoughtSignature is the marker the upstream's own validator accepts in
+// place of a thought signature a client could not preserve — the spelling the
+// official hub client sends for a replayed call whose signature it never saw.
+// A missing signature and a borrowed one are both refused (INVALID_ARGUMENT,
+// verified against the live upstream), so the fallback is the sentinel or
+// nothing.
+const skipThoughtSignature = "skip_thought_signature_validator"
+
+// partThoughtSignature reads a part's thought signature in either spelling.
+// Google's own wire spells the member BOTH ways — the plugin's reader notes
+// "thoughtSignature comes and goes" — and the packer keeps both keys in its
+// map, so a reader that consults one spelling alone silently drops the
+// signature half the time. A dropped signature is not a cosmetic loss: it
+// rides the call_id the client replays, and an unsigned replayed call is
+// refused by the upstream on the NEXT request. Mirrors the plugin's own
+// part_thought_signature, which checks the same two keys.
+func partThoughtSignature(pm map[string]any) string {
+	if s := jsonx.GetString(pm, "thoughtSignature"); s != "" {
+		return s
+	}
+	return jsonx.GetString(pm, "thought_signature")
+}
+
 // uploadedFileURI reports whether uri names a file the target wire already
 // holds: an https URI whose path addresses the wire's uploaded-files
 // namespace. The reference hands such a URI over instead of fetching it — the
@@ -462,6 +485,18 @@ func (f *requestFold) functionCallItem(m map[string]any) error {
 	if i := strings.Index(callID, thoughtSeparator); i >= 0 {
 		sig = callID[i+len(thoughtSeparator):]
 	}
+	if sig == "" {
+		// A client that preserved the signature on the item itself — the
+		// reverse fold writes it to provider_specific_fields as well as the
+		// call id — must have it read back, or the turn loses the signature it
+		// was handed and the upstream sees an unsigned replay.
+		if psf, ok := jsonx.AsMap(firstNonNil(m["provider_specific_fields"], m["providerSpecificFields"])); ok {
+			sig = jsonx.GetString(psf, "thought_signature")
+			if sig == "" {
+				sig = jsonx.GetString(psf, "thoughtSignature")
+			}
+		}
+	}
 	// An object's keys ride the string's own order into the target's args —
 	// a decoded map would alphabetize them — re-rendered with the
 	// reference's separators (jsonx.ArgsValue). Anything else keeps the
@@ -478,9 +513,19 @@ func (f *requestFold) functionCallItem(m map[string]any) error {
 		fc["args"] = parsed
 	}
 	part := map[string]any{"function_call": fc}
-	if sig != "" {
-		part["thoughtSignature"] = sig
+	if sig == "" {
+		// The target rejects a replayed functionCall part that carries no
+		// thoughtSignature (INVALID_ARGUMENT, "Function call is missing a
+		// thought_signature in functionCall parts"), and it VALIDATES the
+		// value: one borrowed from another part of the turn does not clear
+		// it either. A client that round-trips no signature — the common
+		// behavior for a Responses client replaying a call it received as a
+		// bare call_id — has nothing valid left, so the part rides the
+		// upstream's own skip marker rather than a turn that cannot be
+		// replayed at all. A preserved signature always wins.
+		sig = skipThoughtSignature
 	}
+	part["thoughtSignature"] = sig
 	if !functionCallExists(f.parts, part) {
 		f.parts = append(f.parts, part)
 	}

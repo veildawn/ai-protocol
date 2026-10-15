@@ -81,10 +81,90 @@ func TestChatToGeminiToolHistory(t *testing.T) {
 			"function":{"name":"get_weather","arguments":"{\"city\": \"Boston\"}"}}]},
 		{"role":"tool","tool_call_id":"call_1","content":"sunny"}]}`, false)
 	want := `{"contents":[{"parts":[{"text":"weather?"}],"role":"user"},` +
-		`{"parts":[{"function_call":{"args":{"city":"Boston"},"name":"get_weather"}}],"role":"model"},` +
+		`{"parts":[{"function_call":{"args":{"city":"Boston"},"name":"get_weather"},"thoughtSignature":"skip_thought_signature_validator"}],"role":"model"},` +
 		`{"parts":[{"function_response":{"name":"get_weather","response":{"content":"sunny"}}}],"role":"user"}]}`
 	if got := mustJSON(out); got != want {
 		t.Fatalf("got  %s\nwant %s", got, want)
+	}
+}
+
+// A replayed tool call the client preserved no signature for must still carry
+// one onto the target: the upstream refuses a replayed functionCall part
+// without a thoughtSignature (INVALID_ARGUMENT, "Function call is missing a
+// thought_signature in functionCall parts") and validates the value, so the
+// fallback is the upstream's own skip marker. Observed 2026-10-15 on the
+// /v1/responses tool loop; the chat wire replays through the same fold.
+func TestChatToGeminiUnsignedCallTakesSkipMarker(t *testing.T) {
+	out := fold(t, `{"messages":[{"role":"user","content":"look up"},
+		{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function",
+			"function":{"name":"default_api:bash","arguments":"{\"command\": \"ls\"}"}}]},
+		{"role":"tool","tool_call_id":"call_1","content":"ok"}]}`, false)
+	want := `{"contents":[{"parts":[{"text":"look up"}],"role":"user"},` +
+		`{"parts":[{"function_call":{"args":{"command":"ls"},"name":"default_api:bash"},"thoughtSignature":"skip_thought_signature_validator"}],"role":"model"},` +
+		`{"parts":[{"function_response":{"name":"default_api:bash","response":{"content":"ok"}}}],"role":"user"}]}`
+	if got := mustJSON(out); got != want {
+		t.Fatalf("got  %s\nwant %s", got, want)
+	}
+}
+
+// A signature the client DID preserve rides verbatim — on the call, on its
+// function, or as the call id's suffix. The skip marker is the fallback.
+func TestChatToGeminiSignedCallRidesVerbatim(t *testing.T) {
+	for _, tc := range []struct{ name, call string }{
+		{"call field", `"provider_specific_fields":{"thought_signature":"CSIG"}`},
+		{"function field", `"function":{"name":"f","arguments":"{\"a\": 1}","provider_specific_fields":{"thought_signature":"CSIG"}}`},
+	} {
+		call := tc.call
+		if !strings.HasPrefix(call, `"function"`) {
+			call += `,"function":{"name":"f","arguments":"{\"a\": 1}"}`
+		}
+		body := `{"messages":[{"role":"user","content":"q"},
+			{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function",` + call + `}]}]}`
+		out := fold(t, body, false)
+		got := mustJSON(out)
+		if !strings.Contains(got, `"thoughtSignature":"CSIG"`) {
+			t.Errorf("%s: signature not carried verbatim: %s", tc.name, got)
+		}
+		if strings.Contains(got, "skip_thought_signature_validator") {
+			t.Errorf("%s: skip marker must not override a real signature: %s", tc.name, got)
+		}
+	}
+	// The id suffix the chat wire allows.
+	out := fold(t, `{"messages":[{"role":"user","content":"q"},
+		{"role":"assistant","content":null,"tool_calls":[{"id":"call_1__thought__SIG","type":"function",
+			"function":{"name":"f","arguments":"{\"a\": 1}"}}]}]}`, false)
+	if got := mustJSON(out); !strings.Contains(got, `"thoughtSignature":"SIG"`) {
+		t.Errorf("id suffix: signature not carried verbatim: %s", got)
+	}
+}
+
+// Google's own wire spells the thoughtSignature member BOTH ways — the
+// plugin's reader says "thoughtSignature comes and goes" — and it keeps both
+// keys in the map. The reverse fold must lift the signature off the call id in
+// either spelling, or the client replays an unsigned call and the upstream
+// refuses the next request.
+func TestGeminiToChatSignatureReadsEitherSpelling(t *testing.T) {
+	for _, tc := range []struct{ name, member string }{
+		{"camel", `"thoughtSignature":"SIG"`},
+		{"snake", `"thought_signature":"SIG"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			obj, err := jsonx.UnmarshalMap([]byte(
+				`{"contents":[{"role":"user","parts":[{"text":"q"}]},` +
+					`{"role":"model","parts":[{"function_call":{"name":"f","args":{"a":1}},` + tc.member + `}]},` +
+					`{"role":"user","parts":[{"function_response":{"name":"f","response":{"content":"r"}}}]}]}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			out, err := GeminiToChat(obj)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := mustJSON(out)
+			if !strings.Contains(got, thoughtSignatureSeparator+"SIG") {
+				t.Errorf("the signature was dropped: %s", got)
+			}
+		})
 	}
 }
 

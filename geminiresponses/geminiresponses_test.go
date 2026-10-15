@@ -112,7 +112,7 @@ func TestRequestForwardPinnedCases(t *testing.T) {
 	}
 	wantJSON(t, "tool round", out, `{"contents":[
 	 {"role":"user","parts":[{"text":"weather?"}]},
-	 {"role":"model","parts":[{"function_call":{"name":"get_weather","args":{"city":"Boston"}}}]},
+	 {"role":"model","parts":[{"function_call":{"name":"get_weather","args":{"city":"Boston"}},"thoughtSignature":"skip_thought_signature_validator"}]},
 	 {"role":"user","parts":[{"function_response":{"name":"get_weather","response":{"content":"sunny"}}}]}]}`)
 
 	// context_management is the one source parameter the wire cannot carry.
@@ -122,6 +122,96 @@ func TestRequestForwardPinnedCases(t *testing.T) {
 	if _, err := ResponsesToGemini(mustBody(t, `{"model":"m","input":"x","context_management":[{"type":"compaction"}]}`), true); err != nil {
 		t.Errorf("context_management with dropParams: %v", err)
 	}
+}
+
+// A replayed function_call the client preserved no signature for must still
+// carry a signature onto the target: the upstream rejects a replayed call
+// WITHOUT one outright (INVALID_ARGUMENT, "Function call is missing a
+// thought_signature in functionCall parts"), and it validates the value too, so
+// the only honest spelling is the upstream's own skip marker. Observed
+// 2026-10-15: a /v1/responses tool loop whose first turn streamed a
+// default_api:bash call, the client replayed it with no signature, and the
+// upstream 400'd on the second request.
+func TestResponsesToGeminiUnsignedCallTakesSkipMarker(t *testing.T) {
+	out, err := ResponsesToGemini(mustBody(t, `{"model":"m","input":[
+	 {"type":"message","role":"user","content":[{"type":"input_text","text":"look up"}]},
+	 {"type":"function_call","call_id":"call_1","name":"default_api:bash","arguments":"{\"command\": \"ls\"}"},
+	 {"type":"function_call_output","call_id":"call_1","output":"ok"}]}`), false)
+	if err != nil {
+		t.Fatalf("fold: %v", err)
+	}
+	wantJSON(t, "unsigned call", out, `{"contents":[
+	 {"role":"user","parts":[{"text":"look up"}]},
+	 {"role":"model","parts":[{"function_call":{"name":"default_api:bash","args":{"command":"ls"}},"thoughtSignature":"skip_thought_signature_validator"}]},
+	 {"role":"user","parts":[{"function_response":{"name":"default_api:bash","response":{"content":"ok"}}}]}]}`)
+}
+
+// The signature the client DID preserve rides verbatim: the skip marker is the
+// fallback, not the default. A Responses upstream mints it as the call id's
+// suffix, which is where this fold reads it back from.
+func TestResponsesToGeminiSignedCallRidesVerbatim(t *testing.T) {
+	out, err := ResponsesToGemini(mustBody(t, `{"model":"m","input":[
+	 {"type":"message","role":"user","content":[{"type":"input_text","text":"q"}]},
+	 {"type":"function_call","call_id":"call_1__thought__SIG","name":"f","arguments":"{\"a\": 1}"},
+	 {"type":"function_call_output","call_id":"call_1__thought__SIG","output":"ok"}]}`), false)
+	if err != nil {
+		t.Fatalf("fold: %v", err)
+	}
+	wantJSON(t, "signed call", out, `{"contents":[
+	 {"role":"user","parts":[{"text":"q"}]},
+	 {"role":"model","parts":[{"function_call":{"name":"f","args":{"a":1}},"thoughtSignature":"SIG"}]},
+	 {"role":"user","parts":[{"function_response":{"name":"f","response":{"content":"ok"}}}]}]}`)
+}
+
+// Google's own wire spells the member BOTH ways — the plugin's reader says
+// "thoughtSignature comes and goes" — and it keeps both keys in the map, so a
+// reader that consults one spelling alone silently drops the signature half
+// the time. A dropped signature is not cosmetic: it rides the call_id the
+// client replays, and the upstream refuses an unsigned replayed call.
+func TestResponsesSignatureReadsEitherSpelling(t *testing.T) {
+	for _, tc := range []struct{ name, member string }{
+		{"camel", `"thoughtSignature":"SIG"`},
+		{"snake", `"thought_signature":"SIG"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := GeminiResponseToResponses(mustBody(t,
+				`{"candidates":[{"content":{"role":"model","parts":[`+
+					`{"text":"let me think","thought":true,`+tc.member+`},`+
+					`{"functionCall":{"name":"lookup","args":{"q":"x"}},`+tc.member+`}]},`+
+					`"finishReason":"STOP","index":0}],"responseId":"resp-1"}`))
+			got := marshalSorted(out)
+			// The thinking block keeps its signature. The block rides the
+			// reasoning item's encrypted_content, a JSON string, so the wire
+			// carries it escaped.
+			if !strings.Contains(got, `signature`) || !strings.Contains(got, `SIG`) {
+				t.Errorf("the thinking block lost its signature: %s", got)
+			}
+			// The call rides it as the id suffix, so a replay reaches the
+			// upstream signed.
+			if !strings.Contains(got, "__thought__SIG") {
+				t.Errorf("the call did not carry the signature: %s", got)
+			}
+		})
+	}
+}
+
+// The skip-marker fallback also reads the signature from the item's own
+// provider fields (the reverse fold writes it there as well as the call id),
+// so a client that relayed only the field — not the id suffix — still
+// replays a signed call.
+func TestResponsesToGeminiReadsProviderFieldSignature(t *testing.T) {
+	out, err := ResponsesToGemini(mustBody(t, `{"model":"m","input":[
+	 {"type":"message","role":"user","content":[{"type":"input_text","text":"q"}]},
+	 {"type":"function_call","call_id":"call_1","name":"f","arguments":"{\"a\": 1}",
+	  "provider_specific_fields":{"thought_signature":"PSIG"}},
+	 {"type":"function_call_output","call_id":"call_1","output":"ok"}]}`), false)
+	if err != nil {
+		t.Fatalf("fold: %v", err)
+	}
+	wantJSON(t, "provider field signature", out, `{"contents":[
+	 {"role":"user","parts":[{"text":"q"}]},
+	 {"role":"model","parts":[{"function_call":{"name":"f","args":{"a":1}},"thoughtSignature":"PSIG"}]},
+	 {"role":"user","parts":[{"function_response":{"name":"f","response":{"content":"ok"}}}]}]}`)
 }
 
 // TestResponseForwardPinnedCases pins the response fold against the
