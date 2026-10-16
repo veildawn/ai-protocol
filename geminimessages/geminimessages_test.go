@@ -117,6 +117,67 @@ func TestMessagesToGeminiSpecSample(t *testing.T) {
 	assertEqual(t, got, want, "fold")
 }
 
+// A tool result that prints a JSON Schema keeps its text wrapped even though
+// it parses as one object: `$ref` inside a function response is the gemini
+// wire's reserved reference to a media part's display_name, and handing the
+// schema over as structure made the upstream refuse the whole request (400,
+// INVALID_ARGUMENT, "The referenced name ... does not match to a display_name
+// in the function_response.parts"; live 2026-10-16). As text the schema
+// reaches the model verbatim; an object with no `$ref` still rides as
+// structure, exactly as before.
+func TestMessagesToGeminiToolResultJSONSchemaRefStaysText(t *testing.T) {
+	const schema = `{"type": "object", "properties": {"providers": {"items": {"$ref": "#/$defs/provider"}}}}`
+	src := map[string]any{"messages": []any{
+		map[string]any{"role": "user", "content": "schema?"},
+		map[string]any{"role": "assistant", "content": []any{
+			map[string]any{"type": "tool_use", "id": "tu_1", "name": "Bash", "input": map[string]any{}},
+		}},
+		map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "tool_result", "tool_use_id": "tu_1", "content": schema},
+		}},
+	}}
+	got, err := MessagesToGemini(src, false)
+	if err != nil {
+		t.Fatalf("MessagesToGemini: %v", err)
+	}
+	contents, _ := got["contents"].([]any)
+	if len(contents) != 3 {
+		t.Fatalf("contents = %#v, want the call turn and the result turn", got["contents"])
+	}
+	resultTurn, _ := contents[2].(map[string]any)
+	parts, _ := resultTurn["parts"].([]any)
+	if len(parts) != 1 {
+		t.Fatalf("result turn parts = %#v, want one function_response", resultTurn["parts"])
+	}
+	part, _ := parts[0].(map[string]any)
+	fr, _ := part["function_response"].(map[string]any)
+	response, _ := fr["response"].(map[string]any)
+	if len(response) != 1 || response["content"] != schema {
+		t.Fatalf("schema result response = %#v, want it wrapped verbatim under content", fr["response"])
+	}
+
+	// Control: no `$ref`, the parsed object rides as structure.
+	plain := decode(t, `{"model":"m","messages":[
+	    {"role":"user","content":"go"},
+	    {"role":"assistant","content":[{"type":"tool_use","id":"tu_1","name":"f","input":{"a":1}}]},
+	    {"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":"{\"ok\": true, \"n\": 2}"}]}]}`)
+	out, err := MessagesToGemini(plain, false)
+	if err != nil {
+		t.Fatalf("MessagesToGemini control: %v", err)
+	}
+	assertEqual(t, mustJSON(geminiResponseAt(out, 2)), `{"name":"f","response":{"n":2,"ok":true}}`, "plain object result")
+}
+
+// geminiResponseAt digs the function_response turn's single part, sorted for
+// comparison, from the folded contents at index i.
+func geminiResponseAt(out map[string]any, i int) any {
+	contents, _ := out["contents"].([]any)
+	turn, _ := contents[i].(map[string]any)
+	parts, _ := turn["parts"].([]any)
+	part, _ := parts[0].(map[string]any)
+	return part["function_response"]
+}
+
 func TestMessagesToGeminiRejectsContextManagement(t *testing.T) {
 	src := decode(t, `{"model":"m","max_tokens":8,"context_management":{"edits":[]},
 		"messages":[{"role":"user","content":"hi"}]}`)

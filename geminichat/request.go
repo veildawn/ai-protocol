@@ -978,7 +978,15 @@ func toolResponseParts(m map[string]any, lastToolCalls map[string]any) ([]any, e
 	trimmed := strings.TrimSpace(contentStr)
 	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
 		if parsed, err := parseJSONValue(trimmed); err == nil {
-			if pm, isMap := parsed.(map[string]any); isMap {
+			// A `$ref` key anywhere in the parsed object keeps the string
+			// wrapped: the gemini wire reserves `$ref` inside a function
+			// response as a reference to a media part's display_name, so a
+			// tool result that happens to print a JSON Schema is refused
+			// outright upstream when its `$ref`s ride as structure (400,
+			// INVALID_ARGUMENT, "The referenced name ... does not match to a
+			// display_name in the function_response.parts"). As text the
+			// schema reaches the model verbatim.
+			if pm, isMap := parsed.(map[string]any); isMap && !hasReservedRefKey(pm) {
 				response = pm
 			}
 		}
@@ -993,6 +1001,29 @@ func toolResponseParts(m map[string]any, lastToolCalls map[string]any) ([]any, e
 		fr["parts"] = nested
 	}
 	return []any{map[string]any{"function_response": fr}}, nil
+}
+
+// hasReservedRefKey reports whether the media-reference key `$ref` occurs as
+// an object key anywhere in the parsed tool-result object, at any depth. The
+// gemini wire reserves it inside function_response.response — it names a part
+// by display_name — so a result that happens to print a JSON Schema must ride
+// as text rather than structure.
+func hasReservedRefKey(v any) bool {
+	switch t := v.(type) {
+	case map[string]any:
+		for k, val := range t {
+			if k == "$ref" || hasReservedRefKey(val) {
+				return true
+			}
+		}
+	case []any:
+		for _, el := range t {
+			if hasReservedRefKey(el) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // inlineFromDataURL reads a data URL into the inline-blob shape, for the media

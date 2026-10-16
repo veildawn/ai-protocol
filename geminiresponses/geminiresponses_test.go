@@ -276,6 +276,70 @@ func TestToolResultBareImageDataURLIsPromoted(t *testing.T) {
 	}
 }
 
+// A tool result that prints a JSON Schema keeps its text wrapped even though
+// it parses as one object: `$ref` inside a function response is the gemini
+// wire's reserved reference to a media part's display_name, and handing the
+// schema over as structure made the upstream refuse the whole request — 400
+// (INVALID_ARGUMENT, "The referenced name `#/$defs/provider` in
+// function_response.response does not match to a display_name in the
+// function_response.parts"). The first payload is excerpted from that live
+// 400 of 2026-10-16 (admin/debug-logs, antigravity arm): a Bash result
+// printing the manifest schema's provides definition. As text the schema
+// reaches the model verbatim — the wrap every result that does not parse as
+// an object already takes. An object with no `$ref` anywhere still rides as
+// structure, exactly as before.
+func TestToolResultJSONSchemaRefStaysText(t *testing.T) {
+	const production = `{
+ "type": "object",
+ "additionalProperties": false,
+ "required": [
+  "providers"
+ ],
+ "properties": {
+  "providers": {
+   "type": "array",
+   "minItems": 1,
+   "items": {
+    "$ref": "#/$defs/provider"
+   }
+  },
+  "account": {
+   "$ref": "#/$defs/account"
+  }
+ }
+}`
+	for _, tc := range []struct{ name, output string }{
+		{"manifest provides schema (live 400)", production},
+		{"top-level $ref", `{"$ref": "part-name"}`},
+		{"$ref nested inside an array", `{"defs": [{"$ref": "#/$defs/A"}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := ResponsesToGemini(map[string]any{"model": "m", "input": []any{
+				map[string]any{"type": "function_call", "call_id": "c1", "name": "Bash", "arguments": "{}"},
+				map[string]any{"type": "function_call_output", "call_id": "c1", "output": tc.output},
+			}}, false)
+			if err != nil {
+				t.Fatalf("fold: %v", err)
+			}
+			fr := toolResultFunctionResponse(t, out)
+			response, _ := fr["response"].(map[string]any)
+			if len(response) != 1 || response["content"] != tc.output {
+				t.Fatalf("schema result response = %#v, want it wrapped verbatim under content", fr["response"])
+			}
+		})
+	}
+	out, err := ResponsesToGemini(map[string]any{"model": "m", "input": []any{
+		map[string]any{"type": "function_call", "call_id": "c1", "name": "f", "arguments": "{}"},
+		map[string]any{"type": "function_call_output", "call_id": "c1", "output": `{"ok": true, "n": 2}`},
+	}}, false)
+	if err != nil {
+		t.Fatalf("fold: %v", err)
+	}
+	if got := marshalSorted(toolResultFunctionResponse(t, out)["response"]); got != `{"n":2,"ok":true}` {
+		t.Fatalf("plain object result response = %s, want the parsed object as structure", got)
+	}
+}
+
 // toolResultFunctionResponse digs the one function_response out of a folded
 // body produced by the tool-result cases above.
 func toolResultFunctionResponse(t *testing.T, out map[string]any) map[string]any {

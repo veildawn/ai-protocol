@@ -88,6 +88,54 @@ func TestChatToGeminiToolHistory(t *testing.T) {
 	}
 }
 
+// A tool result that prints a JSON Schema keeps its text wrapped even though
+// it parses as one object: `$ref` inside a function response is the gemini
+// wire's reserved reference to a media part's display_name, and handing the
+// schema over as structure made the upstream refuse the whole request — 400
+// (INVALID_ARGUMENT, "The referenced name ... does not match to a display_name
+// in the function_response.parts"; live 2026-10-16 on the /v1/responses tool
+// loop, whose result turn folds through this same wire). As text the schema
+// reaches the model verbatim; an object with no `$ref` still rides as
+// structure, exactly as before.
+func TestChatToGeminiToolResultJSONSchemaRefStaysText(t *testing.T) {
+	const schema = `{"type": "object", "properties": {"providers": {"items": {"$ref": "#/$defs/provider"}}}}`
+	out, err := ChatToGemini(map[string]any{"messages": []any{
+		map[string]any{"role": "user", "content": "schema?"},
+		map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{
+			map[string]any{"id": "call_1", "type": "function",
+				"function": map[string]any{"name": "Bash", "arguments": "{}"}},
+		}},
+		map[string]any{"role": "tool", "tool_call_id": "call_1", "content": schema},
+	}}, false)
+	if err != nil {
+		t.Fatalf("ChatToGemini: %v", err)
+	}
+	contents, _ := out["contents"].([]any)
+	if len(contents) != 3 {
+		t.Fatalf("contents = %#v, want the call turn and the result turn", out["contents"])
+	}
+	resultTurn, _ := contents[2].(map[string]any)
+	parts, _ := resultTurn["parts"].([]any)
+	if len(parts) != 1 {
+		t.Fatalf("result turn parts = %#v, want one function_response", resultTurn["parts"])
+	}
+	part, _ := parts[0].(map[string]any)
+	fr, _ := part["function_response"].(map[string]any)
+	response, _ := fr["response"].(map[string]any)
+	if len(response) != 1 || response["content"] != schema {
+		t.Fatalf("schema result response = %#v, want it wrapped verbatim under content", fr["response"])
+	}
+
+	// Control: no `$ref`, the parsed object rides as structure.
+	plain := fold(t, `{"messages":[{"role":"user","content":"q"},
+		{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function",
+			"function":{"name":"f","arguments":"{}"}}]},
+		{"role":"tool","tool_call_id":"call_1","content":"{\"ok\": true}"}]}`, false)
+	if got := mustJSON(plain); !strings.Contains(got, `"response":{"ok":true}`) {
+		t.Fatalf("plain object result response = %s, want the parsed object as structure", got)
+	}
+}
+
 // A replayed tool call the client preserved no signature for must still carry
 // one onto the target: the upstream refuses a replayed functionCall part
 // without a thoughtSignature (INVALID_ARGUMENT, "Function call is missing a
