@@ -1,6 +1,7 @@
 package geminiresponses
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -896,17 +897,69 @@ func mediaPart(url string) (map[string]any, error) {
 
 // splitDataURL parses `data:<mime>;base64,<bytes>`; the mime keeps any
 // parameters it carries, matching the reference's parser.
+//
+// The scheme must sit at the START of the string, the way the reference reads
+// a data URL (factory.py:1369 `content_str[:5].lower() == "data:"`). An
+// unanchored search is not a cosmetic difference: a tool result that merely
+// MENTIONS a data URL — a Read of a file whose icon field holds one — has
+// everything from that mention onward sliced out as the "payload". The text
+// is then gone AND the slice is not base64, so the upstream refuses the whole
+// turn (400 INVALID_ARGUMENT, "Base64 decoding failed for ..."), permanently:
+// every replay of the conversation carries the same broken part. Observed
+// live 2026-10-16 on this arm — five requests, two payload shapes.
+//
+// The payload must also read as base64 under an alphabet and padding the
+// upstream's own JSON parser takes — see looksBase64. This part is
+// deliberately stricter than the reference's tool-result path, which
+// promotes a junk payload straight to inline_data only for the upstream to
+// refuse the request; the same gate is what the reference runs before it
+// treats a data-URL text part as audio (utils.py:7664 is_base64_encoded).
+// A payload that fails it is not media: the value stays text, which is a
+// turn that works.
 func splitDataURL(url string) (mime string, data string, ok bool) {
-	i := strings.Index(url, "data:")
-	if i < 0 {
+	if len(url) < 5 || !strings.EqualFold(url[:5], "data:") {
 		return "", "", false
 	}
-	rest := url[i+len("data:"):]
+	rest := url[5:]
 	j := strings.Index(rest, ";base64,")
 	if j < 0 {
 		return "", "", false
 	}
-	return strings.ReplaceAll(rest[:j], `\/`, `/`), rest[j+len(";base64,"):], true
+	data = rest[j+len(";base64,"):]
+	if !looksBase64(data) {
+		return "", "", false
+	}
+	return strings.ReplaceAll(rest[:j], `\/`, `/`), data, true
+}
+
+// looksBase64 reports whether s is a payload the upstream's base64 reader
+// takes: the standard or URL alphabet, padded or unpadded (protobuf's JSON
+// mapping accepts all four). Empty is not valid — it names no bytes to send.
+// The byte sweep is what keeps whitespace and prose out: Go's decoders SKIP
+// \r\n rather than reject them, so a file's trailing lines after a real
+// payload would otherwise still "decode" into a request the upstream refuses.
+func looksBase64(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9',
+			c == '+', c == '/', c == '=', c == '-', c == '_':
+		default:
+			return false
+		}
+	}
+	for _, enc := range []*base64.Encoding{
+		base64.StdEncoding, base64.RawStdEncoding,
+		base64.URLEncoding, base64.RawURLEncoding,
+	} {
+		if _, err := enc.DecodeString(s); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // urlMimeTable maps a file extension onto the wire's accepted media types.

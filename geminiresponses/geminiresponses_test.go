@@ -214,6 +214,89 @@ func TestResponsesToGeminiReadsProviderFieldSignature(t *testing.T) {
 	 {"role":"user","parts":[{"function_response":{"name":"f","response":{"content":"ok"}}}]}]}`)
 }
 
+// A tool result is promoted to inline image bytes ONLY when the whole string
+// is one image data URL: the scheme must sit at the string's start and the
+// payload must decode as base64. The unanchored search this fold used to run
+// promoted any text that merely MENTIONED a data URL — the tail of the text
+// was sliced out as the payload — and a payload that is not base64 is refused
+// by the upstream with a 400 (INVALID_ARGUMENT, "Base64 decoding failed"),
+// killing the whole turn.
+//
+// The first two payloads below are verbatim from the live 400s of 2026-10-16
+// (admin/debug-logs, antigravity arm): a Read of a manifest whose icon field
+// holds a data URL, and a Read of Go test source containing one as a literal.
+// In each the text must stay text, whatever it mentions.
+func TestToolResultMentioningDataURLStaysText(t *testing.T) {
+	for _, tc := range []struct{ name, output string }{
+		{"manifest with icon data URL", "1\t{\n2\t  \"icon\": \"data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==\"\n3\t}"},
+		{"source line with data URL literal", "x\"}}}),\n219\t\t})\n220\t"},
+		{"leading text then data URL", "see data:image/png;base64,AAAB for details"},
+		{"data URL scheme without base64 marker", "data:image/png,QUJD"},
+		{"junk payload after the scheme", "data:image/png;base64,!!!"},
+		{"payload with trailing prose", "data:image/png;base64,AAAB\"}\nmore"},
+		{"empty payload", "data:image/png;base64,"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := ResponsesToGemini(map[string]any{"model": "m", "input": []any{
+				map[string]any{"type": "function_call", "call_id": "c1", "name": "Read", "arguments": "{}"},
+				map[string]any{"type": "function_call_output", "call_id": "c1", "output": tc.output},
+			}}, false)
+			if err != nil {
+				t.Fatalf("fold: %v", err)
+			}
+			fr := toolResultFunctionResponse(t, out)
+			if _, hasParts := fr["parts"]; hasParts {
+				t.Fatalf("text mentioning a data URL must not be promoted to media: %#v", fr)
+			}
+			response, _ := fr["response"].(map[string]any)
+			if response["content"] != tc.output {
+				t.Fatalf("text result content = %#v, want it verbatim", response["content"])
+			}
+		})
+	}
+}
+
+// The promotion still happens for the shape it is for: a string that IS an
+// image data URL, scheme first and a real base64 payload behind the marker.
+// The unpadded payload is deliberate — clients send those, and a gate that
+// only accepted padded base64 would demote real media to text.
+func TestToolResultBareImageDataURLIsPromoted(t *testing.T) {
+	out, err := ResponsesToGemini(mustBody(t, `{"model":"m","input":[
+	 {"type":"function_call","call_id":"c1","name":"Read","arguments":"{}"},
+	 {"type":"function_call_output","call_id":"c1","output":"data:image/png;base64,iVBORw0KGgo="}]}`), false)
+	if err != nil {
+		t.Fatalf("fold: %v", err)
+	}
+	fr := toolResultFunctionResponse(t, out)
+	if marshalSorted(fr["parts"]) != `[{"inline_data":{"data":"iVBORw0KGgo=","mime_type":"image/png"}}]` {
+		t.Fatalf("bare image data URL parts = %s", marshalSorted(fr["parts"]))
+	}
+	if marshalSorted(fr["response"]) != `{"content":""}` {
+		t.Fatalf("bare image data URL response = %s", marshalSorted(fr["response"]))
+	}
+}
+
+// toolResultFunctionResponse digs the one function_response out of a folded
+// body produced by the tool-result cases above.
+func toolResultFunctionResponse(t *testing.T, out map[string]any) map[string]any {
+	t.Helper()
+	contents, _ := out["contents"].([]any)
+	if len(contents) != 2 {
+		t.Fatalf("contents = %#v, want the call turn and the result turn", out["contents"])
+	}
+	resultTurn, _ := contents[1].(map[string]any)
+	parts, _ := resultTurn["parts"].([]any)
+	if len(parts) != 1 {
+		t.Fatalf("result turn parts = %#v, want one function_response", resultTurn["parts"])
+	}
+	part, _ := parts[0].(map[string]any)
+	fr, _ := part["function_response"].(map[string]any)
+	if fr == nil {
+		t.Fatalf("part = %#v, want a function_response", part)
+	}
+	return fr
+}
+
 // TestResponseForwardPinnedCases pins the response fold against the
 // reference's own two-hop output, with the ids this contract mints in place
 // of the reference's uuids.
