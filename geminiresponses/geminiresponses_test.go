@@ -514,3 +514,38 @@ func jsonEventType(data string) string {
 	}
 	return ""
 }
+
+func TestResponsesToGeminiDeveloperRole(t *testing.T) {
+	out, err := ResponsesToGemini(mustBody(t, `{
+		"model": "gemini-2.5-pro",
+		"input": [
+			{"type": "message", "role": "developer", "content": "You are a coding assistant."},
+			{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Hello"}]}
+		]
+	}`), false)
+	if err != nil {
+		t.Fatalf("unexpected error folding developer role: %v", err)
+	}
+	wantJSON(t, "developer role folded to system_instruction", out, `{
+		"contents": [{"role": "user", "parts": [{"text": "Hello"}]}],
+		"system_instruction": {"parts": [{"text": "You are a coding assistant."}]}
+	}`)
+
+	// Also verify developer role with content as slice of blocks
+	outBlocks, err := ResponsesToGemini(mustBody(t, `{
+		"model": "gemini-2.5-pro",
+		"instructions": "Base instruction.",
+		"input": [
+			{"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "Developer rule."}]},
+			{"type": "message", "role": "user", "content": "Ping"}
+		]
+	}`), false)
+	if err != nil {
+		t.Fatalf("unexpected error folding developer role blocks: %v", err)
+	}
+	wantJSON(t, "both instructions and developer role folded", outBlocks, `{
+		"contents": [{"role": "user", "parts": [{"text": "Ping"}]}],
+		"system_instruction": {"parts": [{"text": "Base instruction."}, {"text": "Developer rule."}]}
+	}`)
+}
+

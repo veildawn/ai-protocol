@@ -372,7 +372,7 @@ func (f *requestFold) messageItem(m map[string]any) error {
 		role = "user"
 	}
 	switch role {
-	case "system":
+	case "system", "developer":
 		f.addInstructions(content)
 		return nil
 	case "user":
