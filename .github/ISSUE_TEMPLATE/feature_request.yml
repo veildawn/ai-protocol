@@ -1,0 +1,43 @@
+name: Feature request
+description: Propose a mapping fix, a new conversion, or a public API change.
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This library has a deliberately narrow boundary. Read the contract in
+        README.md before proposing public API: routing, billing, credentials
+        and vendor-specific behavior belong to the calling application.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The protocol fact
+      description: What does one wire express that another cannot, and what happens today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: The body or event you expect, and for which direction.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reference
+    attributes:
+      label: Reference
+      description: Fixtures, specs, or the pinned reference version that justifies the mapping.
+
+  - type: checkboxes
+    id: boundary
+    attributes:
+      label: Boundary check
+      options:
+        - label: This change needs no new dependency, no network access, and no vendor-specific behavior.
+          required: true
+        - label: If this adds public API, I understand `boundary_test.go` and the README contract must change in the same pull request.
+          required: true

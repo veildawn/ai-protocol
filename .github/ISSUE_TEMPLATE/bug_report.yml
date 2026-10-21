@@ -1,0 +1,88 @@
+name: Bug report
+description: A conversion produces the wrong body, stream or error.
+title: "fix: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please include a minimal input body — most
+        mapping bugs are visible in the bytes alone.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Tag, pseudo-version, or commit SHA.
+      placeholder: v0.8.5
+    validations:
+      required: true
+
+  - type: dropdown
+    id: direction
+    attributes:
+      label: Conversion direction
+      options:
+        - chat -> messages
+        - messages -> chat
+        - chat -> responses
+        - responses -> chat
+        - chat -> gemini
+        - gemini -> chat
+        - messages -> responses
+        - responses -> messages
+        - messages -> gemini
+        - gemini -> messages
+        - responses -> gemini
+        - gemini -> responses
+        - images -> gemini
+        - gemini -> images
+        - other / not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: shape
+    attributes:
+      label: Shape
+      options:
+        - request body
+        - response body
+        - SSE stream
+    validations:
+      required: true
+
+  - type: textarea
+    id: input
+    attributes:
+      label: Minimal source body
+      description: The smallest JSON or SSE input that shows the problem.
+      render: json
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual output
+      render: json
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected output, and why
+      description: If this is parity with the pinned reference version, say so and cite the fixture.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues for the same conversion.
+          required: true
+        - label: This is not a security issue (those go to SECURITY.md).
+          required: true
