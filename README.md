@@ -1,5 +1,7 @@
 # ai-protocol
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 [![Go Reference](https://pkg.go.dev/badge/github.com/veildawn/ai-protocol.svg)](https://pkg.go.dev/github.com/veildawn/ai-protocol)
 [![CI](https://github.com/veildawn/ai-protocol/actions/workflows/ci.yml/badge.svg)](https://github.com/veildawn/ai-protocol/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/veildawn/ai-protocol)](https://goreportcard.com/report/github.com/veildawn/ai-protocol)
@@ -94,6 +96,9 @@ Both entry points return typed errors — `UnsupportedParamError`,
 `MissingRequiredFieldError`, `ConversionError` — so a host can match them with
 `errors.As` instead of string comparison.
 
+Runnable programs live in [examples/](examples): one converts a request and a
+response, one pipes an SSE turn.
+
 `ConvertRequest` also returns the model name it read from the source body, so a
 router can resolve an upstream before any conversion runs. `PeekModel` does the
 same without a full decode, for hosts that route first.
@@ -180,6 +185,22 @@ Mapping semantics are validated against [LiteLLM](https://github.com/BerriAI/lit
 v1.100.1, whose MIT-licensed protocol mapping this project derives from. The
 attribution is in [NOTICE](NOTICE); the compatibility fixtures that pin the
 behavior are the `litellm_parity_*_test.go` files.
+
+## Testing
+
+```sh
+make test    # unit, compatibility, boundary and property tests
+make fuzz    # 10 seconds per target: conversions, SSE pipe, framer
+make bench   # conversion, pipe and framer benchmarks
+```
+
+The fuzz targets treat the input as hostile: no request body, response body,
+stream or chunking a client or an upstream can produce may panic the codec or
+make a same-dialect conversion change the bytes.
+
+Conversions are allocation-bound rather than I/O-bound — a request fold takes a
+few microseconds on a laptop-class CPU — so `make bench` reports throughput in
+MB/s alongside `ns/op` and allocations.
 
 ## Status
 
