@@ -31,10 +31,12 @@ make fmt-check   # gofmt
 make vet         # go vet
 make test        # go test ./...
 make cover       # coverage summary
+make fuzz        # short fuzz run per target
+make bench       # benchmarks
 ```
 
 CI runs the same commands on Linux, against the oldest supported Go version and
-the latest stable one.
+the latest stable one, plus `govulncheck`.
 
 ## The boundary
 
@@ -77,6 +79,13 @@ make goldens
 
 Review the regenerated files as part of the pull request. A diff in `testdata/`
 without a corresponding test change is suspicious.
+
+## Fuzzing
+
+`fuzz_test.go` treats every input as hostile. When a fuzz target finds a
+crash, Go writes the failing input to `testdata/fuzz/<Target>/` and it becomes a
+permanent regression case. Keep that file in the pull request — it is the test
+that proves the fix.
 
 ## Commit messages
 
