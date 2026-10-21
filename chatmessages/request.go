@@ -271,9 +271,11 @@ func MessagesToChat(body map[string]any) (map[string]any, error) {
 	}
 	// Structured output arrives under the legacy top-level `output_format` or
 	// the newer `output_config.format`; the legacy field wins when both are set.
+	// The inner binding is named `hasConfig` on purpose: reusing `ok` here
+	// would shadow the outer result and drop the fold.
 	of, ok := jsonx.AsMap(body["output_format"])
 	if !ok {
-		if oc, ok := jsonx.AsMap(body["output_config"]); ok {
+		if oc, hasConfig := jsonx.AsMap(body["output_config"]); hasConfig {
 			of, ok = jsonx.AsMap(oc["format"])
 		}
 	}

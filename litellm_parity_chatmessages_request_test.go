@@ -1056,6 +1056,42 @@ func TestMessagesToChatOutputFormatConventionalName(t *testing.T) {
 	}
 }
 
+// The newer output_config.format is folded when the legacy field is absent,
+// and the legacy field wins when both are set.
+func TestMessagesToChatOutputConfigFormat(t *testing.T) {
+	newer := `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":"hi"}],` +
+		`"output_config":{"format":{"type":"json_schema","schema":{"type":"object","properties":{"fresh":{"type":"string"}}}}}}`
+	out, err := ConvertRequest(Messages, Chat, []byte(newer))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out.Body, &m); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := m["response_format"]; !present {
+		t.Fatalf("output_config.format folded nothing: %s", out.Body)
+	}
+
+	// Both spellings present: the legacy field is the one the caller meant.
+	both := `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":"hi"}],` +
+		`"output_format":{"type":"json_schema","schema":{"type":"object","properties":{"legacy":{"type":"string"}}}},` +
+		`"output_config":{"format":{"type":"json_schema","schema":{"type":"object","properties":{"newer":{"type":"string"}}}}}}`
+	out, err = ConvertRequest(Messages, Chat, []byte(both))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m = map[string]any{}
+	if err := json.Unmarshal(out.Body, &m); err != nil {
+		t.Fatal(err)
+	}
+	schema := m["response_format"].(map[string]any)["json_schema"].(map[string]any)["schema"].(map[string]any)
+	props := schema["properties"].(map[string]any)
+	if _, legacy := props["legacy"]; !legacy {
+		t.Fatalf("legacy output_format did not win: %#v", props)
+	}
+}
+
 // A dict tool_choice is read by its shape: a type-keyed choice names a mode,
 // and a choice carrying a function names that function whatever its type
 // field says. A type:tool choice with the name at the top level names nothing
