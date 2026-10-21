@@ -325,9 +325,6 @@ func (s *chatToMsgState) ensureBlock(typ string, block map[string]any) []stream.
 	}
 	var evs []stream.Event
 	evs = append(evs, s.closeBlock()...)
-	if s.blockOpen {
-		// closed
-	}
 	idx := 0
 	if s.blockType != "" {
 		idx = s.blockIndex + 1

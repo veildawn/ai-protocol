@@ -1,3 +1,6 @@
+// Package jsonx carries the small JSON helpers the codec shares: typed reads
+// from a decoded body, marshaling that round-trips a caller's number forms,
+// and the argument normalization tool calls need.
 package jsonx
 
 import (

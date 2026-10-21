@@ -1385,16 +1385,3 @@ func first(a, b string) string {
 	}
 	return b
 }
-
-func mustArgs(v any) string {
-	switch t := v.(type) {
-	case string:
-		return t
-	default:
-		b, _ := json.Marshal(v)
-		if len(b) == 0 {
-			return "{}"
-		}
-		return string(b)
-	}
-}

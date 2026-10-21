@@ -1138,9 +1138,7 @@ func responsesTools(body map[string]any, dropParams bool) ([]any, map[string]any
 			decls = append(decls, customToolDeclaration(m))
 		case "namespace":
 			chatSurvivors++
-			for _, decl := range namespaceToolDeclarations(m) {
-				decls = append(decls, decl)
-			}
+			decls = append(decls, namespaceToolDeclarations(m)...)
 		case "web_search", "web_search_preview":
 			hasSearch = true
 		case "computer_use", "image_generation", "shell":

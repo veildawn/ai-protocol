@@ -331,7 +331,6 @@ type geminiToMessagesState struct {
 	started   bool
 	closed    bool
 	id        string
-	idMinted  bool
 	model     string
 	blockOpen bool
 	blockType string // "" | "text" | "thinking" | "tool_use"

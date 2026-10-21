@@ -797,16 +797,6 @@ func isWebSearchTool(tool map[string]any) bool {
 	return strings.HasPrefix(t, "web_search") || jsonx.GetString(tool, "name") == "web_search"
 }
 
-// geminiToolKeys are the tool keys only the target wire defines. A Messages
-// tool that is exactly one of these passes through: the caller is speaking the
-// target's own vocabulary, and rewriting it would drop the configuration.
-var geminiToolKeys = []string{
-	"googleSearch", "google_search", "googleSearchRetrieval", "google_search_retrieval",
-	"enterpriseWebSearch", "enterprise_web_search", "urlContext", "url_context",
-	"codeExecution", "code_execution", "googleMaps", "google_maps",
-	"computerUse", "computer_use",
-}
-
 // camelToolKey maps a tool key onto the target's own camelCase spelling.
 var camelToolKey = map[string]string{
 	"googleSearch": "googleSearch", "google_search": "googleSearch",
