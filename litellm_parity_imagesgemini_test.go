@@ -14,7 +14,7 @@ import (
 // there — a separate path from its chat adapter): every expected body below
 // was produced by running the reference from the repo venv:
 //
-//	.zcode/litellm-venv/bin/python
+//	python3
 //	  litellm/llms/gemini/image_generation/transformation.py:
 //	    GoogleImageGenConfig.map_openai_params -> transform_image_generation_request
 //	  litellm/llms/gemini/image_edit/transformation.py:
@@ -28,7 +28,7 @@ import (
 //
 // The gemini->images request direction and the images->gemini response
 // direction have no forward path in the reference: their expectations are
-// derived from the spec's inverse rules (.zcode/images-spec.md §5, each row
+// derived from the spec's inverse rules (the reference specification §5, each row
 // cites the forward mapping it inverts) and are validated below by feeding
 // this codec's output back through its own forward folds.
 //

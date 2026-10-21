@@ -7,7 +7,8 @@
 // spelling quirks are reproduced verbatim — snake_case `response_modalities`
 // (the chat path writes the camelCase twin of the same key), contents parts
 // with no `role`, and input images as `inlineData` parts ahead of the prompt
-// text. See .zcode/images-spec.md for the pinned rules and the ran samples.
+// text. See the reference specification for the pinned rules and the samples
+// that were run.
 package imagesgemini
 
 import (

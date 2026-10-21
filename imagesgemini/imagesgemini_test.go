@@ -11,7 +11,7 @@ import (
 
 // The folds here are pinned against the reference's own image adapters' output
 // shapes for the same inputs (the request bodies below are ran samples; see
-// .zcode/images-spec.md), and the rest are the smallest inputs that expose
+// the reference specification), and the rest are the smallest inputs that expose
 // each rule this package owns: the shape discriminator, the refusal set, the
 // size table's exact-hit rows and the usage fallbacks.
 

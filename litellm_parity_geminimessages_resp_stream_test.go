@@ -11,7 +11,7 @@ import (
 
 // This file pins the Messages<->gemini response and SSE folds against LiteLLM
 // v1.100.1. The forward direction's wants come from the reference's composed
-// stack, run with .zcode/litellm-venv/bin/python during this audit:
+// stack, run with python during this audit:
 //
 //   responses: vertex_and_google_ai_studio_gemini.py:2406
 //     _transform_google_generate_content_to_openai_model_response

@@ -14,7 +14,7 @@ import (
 // translate_anthropic_to_openai -> litellm.get_optional_params(custom_llm_provider=
 // "vertex_ai") -> llms/vertex_ai/gemini/transformation.py sync_transform_request_body).
 // Every want in the forward cases below is the JSON that composition actually
-// printed for the same input, run with .zcode/litellm-venv/bin/python during
+// printed for the same input, run with python during
 // this audit; nothing here is hand-derived. The reverse direction has no
 // forward path in the reference, so its wants are the spec's inverse rules,
 // each cross-checked by feeding this codec's output back through the
@@ -64,7 +64,7 @@ func gmParityEqual(t *testing.T, got, want any, what string) {
 // The headline two-hop sample: a tool round trip, a system prompt, an auto
 // tool choice, thinking and stop sequences. This is the body the reference's
 // composed fold prints for the Messages request the spec's §2.2 quotes (run
-// this audit via .zcode/verify_spec_two_hop.py's M2 entry, which asserts this
+// this audit via the two-hop audit script's M2 entry, which asserts this
 // same JSON; the exact print was taken from
 // adapter.translate_anthropic_to_openai -> sync_transform_request_body).
 func TestGeminiMessagesParityRequestTwoHopSample(t *testing.T) {
@@ -266,7 +266,7 @@ func TestGeminiMessagesParityRequestParamsAndToolMerge(t *testing.T) {
 // gains the blank text part the target requires (litellm:
 // common_utils.py:494-505 _check_text_in_content — the " " append). The
 // text+image print comes from this audit; the blank-append rule from the same
-// run family (.zcode/verify_spec.py, spec §2.1 rule 5).
+// run family (the audit script, spec §2.1 rule 5).
 func TestGeminiMessagesParityRequestImageTurn(t *testing.T) {
 	got := gmParityFold(t, `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":[
 	    {"type":"text","text":"look"},
@@ -321,7 +321,7 @@ func TestGeminiMessagesParityRequestSystemBlockList(t *testing.T) {
 // lands on 4096 and 0 on 128 (litellm: types/utils EffortFromBudget buckets
 // plus vertex_and_google_ai_studio_gemini.py:799-846 effort->budget). Every
 // want printed by the composed reference this audit (same runs as
-// .zcode/verify_spec_two_hop.py's ladder checks).
+// the two-hop audit script's ladder checks).
 func TestGeminiMessagesParityRequestThinkingLadder(t *testing.T) {
 	for _, tc := range []struct {
 		thinking string
@@ -354,7 +354,7 @@ func TestGeminiMessagesParityRequestThinkingLadder(t *testing.T) {
 // The hosted web-search tool becomes the target's own search tool, and is
 // dropped when function declarations ride with it — that wire refuses the
 // mixture (litellm: vertex_and_google_ai_studio_gemini.py:516-563). Prints
-// from .zcode/verify_spec_two_hop.py, run this audit.
+// from the two-hop audit script, run this audit.
 func TestGeminiMessagesParityRequestHostedWebSearch(t *testing.T) {
 	got := gmParityFold(t, `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":"x"}],
 		"tools":[{"type":"web_search_20250305","name":"web_search","max_uses":3}]}`)

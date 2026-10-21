@@ -5,7 +5,7 @@
 // fold input items and parameters onto the wire's contents and generation
 // config, response bodies fold candidates back onto Responses output items,
 // and streams fold frames both ways. The design rules live in
-// .zcode/gemini-spec.md.
+// the reference specification.
 package geminiresponses
 
 import (

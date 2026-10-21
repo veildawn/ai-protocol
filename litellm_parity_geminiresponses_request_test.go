@@ -8,7 +8,7 @@ import (
 )
 
 // This file pins the Responses<->Gemini request folds against LiteLLM v1.100.1,
-// run through the venv in .zcode/litellm-venv. The reference has no direct
+// run through the reference's virtualenv. The reference has no direct
 // path between these dialects: every forward expectation below was produced by
 // composing its two hops —
 //   RSP.transform_responses_api_request_to_chat_completion_request
@@ -20,7 +20,7 @@ import (
 // and pasting the result. The reverse direction (GeminiToResponses) has no
 // forward path in the reference; its expectations are the spec's inverse rules,
 // and each body was fed back through the reference's forward composition to
-// confirm it restores the original (script: .zcode/roundtrip_reverse.py).
+// confirm it restores the original (script: the reverse-round-trip audit script).
 
 // gemRespParityRequest folds one Responses request body onto the gemini wire
 // and returns the decoded result.
@@ -700,7 +700,7 @@ func TestResponsesToGeminiParityBadArgumentsFail(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // The reverse fold's outputs below were fed back through the reference's
-// forward composition (.zcode/roundtrip_reverse.py) and restored the original
+// forward composition (the reverse-round-trip audit script) and restored the original
 // bodies up to the documented forward-side drops: safetySettings and
 // cachedContent have no chat landing, the bridge drops service_tier, system
 // parts join into one instructions string, a blank description is added to

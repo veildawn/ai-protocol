@@ -13,7 +13,7 @@ import (
 // path there): every expected body below was produced by running the
 // reference adapters from the repo venv:
 //
-//	.zcode/litellm-venv/bin/python
+//	python3
 //	  litellm.get_optional_params(model="gemini-2.5-pro",
 //	      custom_llm_provider="vertex_ai", drop_params=<drop>, <params>)
 //	  -> litellm/llms/vertex_ai/gemini/transformation.py:sync_transform_request_body

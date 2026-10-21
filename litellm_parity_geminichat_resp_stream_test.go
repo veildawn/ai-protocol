@@ -14,7 +14,7 @@ import (
 // paths there): every expected value was produced by running the reference
 // adapters from the repo venv:
 //
-//	.zcode/litellm-venv/bin/python
+//	python3
 //	  responses: VertexGeminiConfig._transform_google_generate_content_to_openai_model_response
 //	             (litellm/llms/vertex_ai/gemini/vertex_and_google_ai_studio_gemini.py:2406-2505)
 //	  streams:   ModelResponseIterator(...).chunk_parser

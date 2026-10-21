@@ -8,7 +8,7 @@ import (
 )
 
 // This file pins the Responses<->Gemini response and stream folds against
-// LiteLLM v1.100.1, run through the venv in .zcode/litellm-venv. The reference
+// LiteLLM v1.100.1, run through the reference's virtualenv. The reference
 // has no direct path between these dialects; every forward expectation was
 // produced by composing its two hops —
 //   VGS._transform_google_generate_content_to_openai_model_response
@@ -28,7 +28,7 @@ import (
 // have no forward path in the reference; their expectations are the spec's
 // inverse rules, and each body was fed back through the reference's forward
 // composition to confirm it restores the original (script:
-// .zcode/roundtrip_reverse.py).
+// the reverse-round-trip audit script).
 
 // gemRespParityResponse folds one gemini response body onto the Responses
 // dialect and returns the decoded result.

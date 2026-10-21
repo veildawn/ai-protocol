@@ -1,8 +1,9 @@
+package imagesgemini
+
 // Response-direction folds between the gemini generateContent response body
 // and the Images dialect's response shape. The forward fold is the reference
 // image adapter's response transform; the reverse is the spec's inverse. See
-// .zcode/images-spec.md §4-§5.
-package imagesgemini
+// the reference specification §4-§5.
 
 import (
 	"encoding/base64"
