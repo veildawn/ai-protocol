@@ -56,10 +56,34 @@ jobs:
           cache: true
 
       - name: coverage
-        run: go test -count=1 -coverprofile=coverage.out ./...
+        run: go test -count=1 -coverpkg=./... -coverprofile=coverage.out ./...
 
-      - name: summary
-        run: go tool cover -func=coverage.out | tail -1 | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: gate
+        run: |
+          total="$(go tool cover -func=coverage.out | awk '/^total:/ {sub(/%/, "", $3); print $3}')"
+          echo "statement coverage: ${total}%" | tee -a "$GITHUB_STEP_SUMMARY"
+          awk -v t="$total" 'BEGIN {
+            if (t + 0 < 78) {
+              printf "::error::coverage %.1f%% is below the 78%% floor\n", t
+              exit 1
+            }
+          }'
+
+  staticcheck:
+    name: staticcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: true
+
+      - name: staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@v0.8.2
+          "$(go env GOPATH)/bin/staticcheck" ./...
 
   fuzz:
     name: fuzz ${{ matrix.target }}
