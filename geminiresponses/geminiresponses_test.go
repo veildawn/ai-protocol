@@ -548,4 +548,3 @@ func TestResponsesToGeminiDeveloperRole(t *testing.T) {
 		"system_instruction": {"parts": [{"text": "Base instruction."}, {"text": "Developer rule."}]}
 	}`)
 }
-

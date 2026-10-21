@@ -20,10 +20,10 @@ import (
 // used to break it: a tool call and text in the same response, in either order.
 
 type contractEvent struct {
-	Type      string `json:"type"`
-	ItemID    string `json:"item_id"`
-	Seq       *int64 `json:"sequence_number"`
-	Item      *struct {
+	Type   string `json:"type"`
+	ItemID string `json:"item_id"`
+	Seq    *int64 `json:"sequence_number"`
+	Item   *struct {
 		ID   string `json:"id"`
 		Type string `json:"type"`
 	} `json:"item"`
