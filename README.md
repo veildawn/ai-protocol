@@ -1,148 +1,199 @@
 # ai-protocol
 
-A **public dialect codec**: it converts JSON bodies and SSE streams between the
-public LLM dialects, and it does nothing else.
+[![Go Reference](https://pkg.go.dev/badge/github.com/veildawn/ai-protocol.svg)](https://pkg.go.dev/github.com/veildawn/ai-protocol)
+[![CI](https://github.com/veildawn/ai-protocol/actions/workflows/ci.yml/badge.svg)](https://github.com/veildawn/ai-protocol/actions/workflows/ci.yml)
+[![Go Report Card](https://goreportcard.com/badge/github.com/veildawn/ai-protocol)](https://goreportcard.com/report/github.com/veildawn/ai-protocol)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-- `chat` — OpenAI Chat Completions (`/v1/chat/completions`)
-- `messages` — Anthropic Messages (`/v1/messages`)
-- `responses` — OpenAI Responses (`/v1/responses`)
-- `gemini` — the generateContent wire (`contents`/`parts`, `candidates`,
-  `finishReason`)
-- `images` — the image-generation wire (`prompt`/`n`/`size` requests, edits
-  with `image[]`, `data[]` of `b64_json` responses)
+A Go library that converts request bodies, response bodies and SSE streams
+between the public LLM wire formats. It is a set of pure functions with no
+dependencies outside the standard library, no I/O, and no network.
 
-Mappings follow [LiteLLM](https://github.com/BerriAI/litellm) **v1.100.1** (see
-[NOTICE](NOTICE)).
+| Dialect     | Wire                                                              |
+| ----------- | ----------------------------------------------------------------- |
+| `chat`      | OpenAI Chat Completions (`/v1/chat/completions`)                  |
+| `messages`  | Anthropic Messages (`/v1/messages`)                               |
+| `responses` | OpenAI Responses (`/v1/responses`)                                |
+| `gemini`    | The `generateContent` wire (`contents`/`parts`, `candidates`)     |
+| `images`    | The image-generation wire (`prompt`/`n`/`size`, `b64_json`)       |
 
-## The contract
+## Why this exists
 
-This library is a leaf. Everything a host needs to know about the boundary is in
-this list, and `boundary_test.go` fails the build when a change breaks one of
-them.
+An API gateway, proxy or SDK that accepts more than one public API shape has to
+translate between them. Written per pair, that is N×M bodies of mapping code
+that drift apart, disagree about edge cases, and bury protocol facts inside
+HTTP handlers.
 
-**What it is**
+This library takes the translation out of the transport: every mapping is a
+pure function over bytes or `map[string]any`, conversions name the protocol
+facts they cannot preserve, and the package does not open connections, read
+clocks, or know which upstream it is talking to. The caller keeps routing,
+retries, credentials and vendor-specific behavior.
 
-- Five public dialects. The text dialects (`chat`, `messages`, `responses`,
-  `gemini`) convert between any pair of them, request/response/SSE;
-  `images` pairs with `gemini` on request/response bodies only — image
-  generation does not stream, so the pair has no SSE fold. All conversions are
-  pure functions.
-- `PeekModel` reads the top-level `model` member without a full decode, for the
-  hosts that route on it before any conversion runs. A gemini body has no
-  `model` member (the name rides the URL there), so the peek answers `("", nil)`
-  for it — an absent member is not an error.
-- `Normalize` accepts the dialect names plus the gateway spellings `openai` and
-  `anthropic`. `gemini` has no alias: the deployment and studio spellings of
-  that wire are not public dialect names, so the dialect's own name is the only
-  one that normalizes. `images` has no alias either.
-- Explicit error semantics: `UnsupportedParamError` for a parameter the target
-  dialect cannot carry, `MissingRequiredFieldError` for a field the target
-  dialect requires that the caller declined to supply (Messages folds and
-  `max_tokens`, when the request carries no thinking budget to derive it from),
-  `ConversionError` for a body it cannot read, and
-  `StreamResult` (`Terminal`/`Truncated`/`InBandErr`) for how a stream ended.
-- `WriteTerminalError` mints a dialect's terminal error frame — the mold only.
-  The verdict, the error type name and the bounded message are the host's: a
-  fold emits nothing of its own for a failed source, so the frame the client
-  must see is the host's, and this is that frame in the client's own wire.
-  Gemini gets an error-object data frame with no sentinel (status fixed at
-  UNAVAILABLE — a mid-flight abort is the host's verdict, not a relayed code),
-  Messages and Responses a named `event: error` frame, Chat the payload plus
-  `[DONE]`.
-- `stream.Framer` incrementally yields complete SSE events from split reads;
-  `stream.ClassifyEvent` reports per-event public-protocol facts (prelude,
-  content, reasoning, completion, incomplete, failure or unknown). A Chat
-  `finish_reason` is a logical completion fact, not a wire-terminal frame;
-  Chat's `[DONE]` remains distinct. The gemini wire has no sentinel at all —
-  its terminal fact is the frame whose candidate carries a `finishReason` (or
-  a blocked prompt), which is the source's own close. These facts do not decide
-  retry, billing or routing.
-- Offline and standard-library only. No module dependencies, no I/O, no clock.
+## Supported conversions
 
-**What it is not**
+All four text dialects convert between any pair. `images` pairs with `gemini`
+only, on request and response bodies — image generation does not stream, so
+that pair has no SSE fold.
 
-- **No HTTP.** It never opens a connection and never sees a header.
-- **No provider routing.** It does not choose an upstream, and it knows nothing
-  about accounts, quota, billing or policy.
-- **No vendor knowledge.** No brand names, no vendor hosts, no vendor-specific
-  parameter repair. Those live in a provider plugin, which is also where the
-  private wire format lives.
+| Source ↓ / Target → | `chat` | `messages` | `responses` | `gemini` | `images` |
+| ------------------- | ------ | ---------- | ----------- | -------- | -------- |
+| `chat`              | copy   | req/resp/SSE | req/resp/SSE | req/resp/SSE | — |
+| `messages`          | req/resp/SSE | copy | req/resp/SSE | req/resp/SSE | — |
+| `responses`         | req/resp/SSE | req/resp/SSE | copy | req/resp/SSE | — |
+| `gemini`            | req/resp/SSE | req/resp/SSE | req/resp/SSE | copy | req/resp |
+| `images`            | — | — | — | req/resp | copy |
 
-**Where it sits**
+A same-dialect call returns the original bytes unchanged.
 
-```
-client public dialect        openai / anthropic / responses / gemini / images, as the client speaks it
-        ↓
-ai-protocol                  public ↔ public conversion, pure functions
-        ↓
-public provider dialect      the arm the provider plugin declares it exposes
-        ↓
-provider plugin              public → vendor wire, vendor quirks, credentials
-        ↓
-vendor wire
+## Install
+
+```sh
+go get github.com/veildawn/ai-protocol@latest
 ```
 
-A host supplies **policy** through the seams on the options types — `Flush` for
-write-through, `OnEvent` for rewriting decoded stream events,
-`MaxTokensFallback` for the value of a required field a fold cannot derive —
-and the policy itself stays in the host. Nothing in this library has an opinion
-about what a hook does or what a supplied value should be. A fold into Messages
-derives `max_tokens` from a thinking budget when the request names no ceiling,
-and otherwise asks the host for the value rather than inventing one.
+Requires Go 1.23 or newer. The module has no third-party dependencies.
 
-## Usage
+## Quick start
 
 ```go
-import "github.com/veildawn/ai-protocol"
+package main
 
-out, err := protocol.ConvertRequest(protocol.Chat, protocol.Messages, body)
-resp, err := protocol.ConvertResponse(protocol.Messages, protocol.Chat, upstream)
-n, err := protocol.PipeStream(protocol.Messages, protocol.Chat, dst, src, protocol.StreamOpts{Flush: flush})
+import (
+	"fmt"
+
+	protocol "github.com/veildawn/ai-protocol"
+)
+
+func main() {
+	// A client sent a chat-completions body; the upstream speaks messages.
+	body := []byte(`{"model":"example-model","messages":[{"role":"user","content":"hi"}]}`)
+
+	req, err := protocol.ConvertRequestWith(protocol.Chat, protocol.Messages, body, protocol.ConvertOptions{
+		// The messages wire requires max_tokens. A fold that cannot derive it
+		// from a thinking budget asks for the value rather than inventing one.
+		MaxTokensFallback: 8192,
+	})
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("upstream body: %s\n", req.Body)
+
+	// ... send req.Body to the upstream, read its response ...
+
+	upstream := []byte(`{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"hello"}]}`)
+	out, err := protocol.ConvertResponse(protocol.Messages, protocol.Chat, upstream)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("client body: %s\n", out)
+}
 ```
 
-Same-dialect calls return the original bytes unchanged.
+Both entry points return typed errors — `UnsupportedParamError`,
+`MissingRequiredFieldError`, `ConversionError` — so a host can match them with
+`errors.As` instead of string comparison.
 
-Streaming takes an optional per-event hook, applied to every target-dialect
-event just before it is written — including the terminal frames a fold
-synthesizes. A fold closes the turn for the client only when the **source**
-closed it too: Responses and Messages have exactly one legal ending, so a stream
-that stops without it is a truncation, the fold leaves the turn open, and
-`StreamResult.Truncated` tells the host (which is where the failure the host
-records and the failure the client sees become the same failure). A Chat source
-is the exception, because several vendors close on a usage chunk instead of
-`[DONE]`: its folds still close the turn for the client. A gemini source states
-its close on the frame whose candidate carries a `finishReason` (a blocked
-prompt states one too, as a filter); a relay's `[DONE]` closes the turn without
-inventing a reason, and a bare EOF is a truncation like any other. It is how a
-host applies a rewriting this library does not know about without re-parsing
-serialized SSE:
+`ConvertRequest` also returns the model name it read from the source body, so a
+router can resolve an upstream before any conversion runs. `PeekModel` does the
+same without a full decode, for hosts that route first.
+
+## Streaming
 
 ```go
-result, err := protocol.PipeStreamWith(protocol.Chat, protocol.Responses, dst, src, protocol.StreamOpts{
-    Flush: flush,
-    OnEvent: func(ev stream.Event) (stream.Event, error) {
-        // rewrite ev.Event / ev.Data, or return ev untouched
-        return ev, nil
-    },
+// w is the http.ResponseWriter; upstream is the upstream response body.
+result, err := protocol.PipeStreamWith(protocol.Messages, protocol.Chat, w, upstream, protocol.StreamOpts{
+	Flush: func() { w.(http.Flusher).Flush() },
 })
+if err != nil {
+	// Transport or decode failure.
+}
+switch {
+case result.InBandErr != nil:
+	// The source framed a failure inside a successful stream.
+case result.Truncated:
+	// The source ended without its own terminal frame. The turn was left
+	// open on purpose: only the source gets to close it.
+case result.Terminal:
+	// The source closed the turn itself.
+}
 ```
 
-A nil hook is the identity: the bytes written are exactly what the converter
-produces on its own. Hooks are **not** called on the same-dialect path, which is
-a raw copy with nothing decoded to hand a hook.
+`StreamResult` reports how the source stream ended, separately from the bytes
+written to the destination (`result.Written`). A converter never closes a turn
+the source did not close.
 
-`stream.Framer` dispatches only after an SSE event delimiter, retaining partial
-lines across `Feed` calls and dispatching the final event at `Finish`. `Event`
-contains the decoded event name and data only: a host that observes events while
-forwarding must retain and replay the original wire bytes separately if it
-needs to preserve comments, `id`, `retry`, or exact line endings. `ClassifyEvent`
-requires the public source dialect when inference is ambiguous and returns
-`EventUnknown` for payloads it cannot classify; callers own the compatibility
-policy for unknown events.
+For policy the library should not know about — redaction, tool-name rewriting,
+metrics — pass `StreamOpts.OnEvent`. It sees every target-dialect event
+immediately before it is written, and is not called on the same-dialect path,
+which is a raw copy.
 
-## Changing the boundary
+`stream.Framer` yields complete SSE events from split reads.
+`stream.ClassifyEvent` reports per-event protocol facts (prelude, content,
+reasoning, completion, incomplete, failure, unknown) without deciding retry or
+billing policy.
 
-Adding public API, a dependency, a dialect or an import is a boundary decision,
-not an implementation detail. `boundary_test.go` will fail and point here: either
-update the allowlist in that file *and* this contract, or move the change to the
-consumer where the policy belongs.
+## Reporting lost parameters
+
+A conversion can drop or reshape what the target dialect cannot carry. Losses
+name those facts explicitly, so a caller can decide whether an omission is
+acceptable before or alongside the conversion:
+
+```go
+losses := protocol.BodyLosses(protocol.Chat, protocol.Messages, body, protocol.ConvertOptions{})
+if losses[protocol.LossLogprobs] {
+	// The messages wire has no logprobs; decide whether that is acceptable.
+}
+```
+
+`StaticLosses(from, to)` returns every loss possible for a directed pair,
+independent of one body. `Loss` values are descriptive protocol facts,
+never routing policy. The full list is in [loss.go](loss.go).
+
+## Errors
+
+| Error                      | Meaning                                                              |
+| -------------------------- | -------------------------------------------------------------------- |
+| `UnsupportedParamError`    | The target dialect cannot carry a parameter; set `DropParams` to omit |
+| `MissingRequiredFieldError`| The target requires a field the caller declined to supply            |
+| `ConversionError`          | The body could not be read or rebuilt                                |
+
+Errors are typed and wrapped where useful; match them with `errors.As`.
+
+## Design guarantees
+
+These are enforced by `boundary_test.go`, which fails the build when one is
+broken:
+
+- **Standard library only.** No `require` directives, no third-party imports.
+- **Offline.** No `net`, no HTTP, no clock, no filesystem.
+- **Pure conversions.** Same input, same output; no global state.
+- **Five dialects, closed set.** A new wire format is a deliberate boundary
+  decision, not an implementation detail.
+- **No vendor behavior.** Vendor-specific parameter repair, hostnames,
+  credentials and quirks belong to the caller, not to the codec.
+- **No policy.** Routing, billing, quota and retry decisions stay outside.
+
+## Compatibility
+
+Mapping semantics are validated against [LiteLLM](https://github.com/BerriAI/litellm)
+v1.100.1, whose MIT-licensed protocol mapping this project derives from. The
+attribution is in [NOTICE](NOTICE); the compatibility fixtures that pin the
+behavior are the `litellm_parity_*_test.go` files.
+
+## Status
+
+Pre-1.0 (`v0.8.x`). The public surface is small and pinned by tests;
+versioning follows [SemVer](https://semver.org/), so a minor release may still
+change it and a patch release does not.
+
+## Contributing
+
+Bug reports, mapping fixes and new parity fixtures are welcome. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for the build, test and boundary rules.
+Please read [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) first. For security
+issues, follow [SECURITY.md](SECURITY.md) instead of opening a public issue.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

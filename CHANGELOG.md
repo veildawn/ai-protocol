@@ -1,0 +1,246 @@
+# Changelog
+
+All notable changes to this project are documented here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
+adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.8.5] - 2026-10-17
+
+### Fixed
+
+- Gemini/Responses folds: developer-role messages fold into system instructions.
+
+## [0.8.4] - 2026-10-16
+
+### Fixed
+
+- Gemini folds: a `$ref`-bearing tool result stays wrapped as text.
+
+## [0.8.3] - 2026-10-16
+
+### Fixed
+
+- Gemini/Responses folds: anchor the tool-result data URL at the scheme.
+
+## [0.8.2] - 2026-10-16
+
+### Fixed
+
+- Gemini folds: read the thought signature in either spelling.
+
+## [0.8.1] - 2026-10-16
+
+### Fixed
+
+- Gemini folds: stamp the skip marker on every replayed call, in either
+  spelling.
+
+## [0.8.0] - 2026-10-15
+
+### Added
+
+- `WriteTerminalError` mints a dialect's terminal error frame, so a host that
+  aborts a delivery mid-stream can end it in the client's own wire.
+
+## [0.7.0] - 2026-10-15
+
+### Added
+
+- The `images` dialect (image-generation wire).
+- The `images`↔`gemini` fold pair, request and response bodies only.
+
+## [0.6.6] - 2026-10-15
+
+### Fixed
+
+- Responses folds: announce every output item when it opens, and keep
+  same-frame tool calls.
+
+## [0.6.5] - 2026-10-14
+
+### Fixed
+
+- Gemini/Messages folds: send the skip marker for a call whose signature was
+  lost.
+
+## [0.6.4] - 2026-10-14
+
+### Fixed
+
+- Gemini/Messages folds: lift the turn's thinking signature onto unsigned
+  calls.
+
+## [0.6.3] - 2026-10-14
+
+### Fixed
+
+- Gemini folds: fold each thinking block to one signed thought part.
+
+## [0.6.2] - 2026-10-14
+
+### Fixed
+
+- Gemini/Messages folds: merge same-role runs on the reverse fold and skip
+  empty-part contents.
+
+## [0.6.1] - 2026-10-14
+
+### Fixed
+
+- Messages folds: sign rebuilt thinking blocks and fold assistant text before
+  its calls.
+
+## [0.6.0] - 2026-10-14
+
+### Added
+
+- The `gemini` dialect (`generateContent` wire) and its six conversions.
+
+## [0.5.1] - 2026-10-13
+
+### Added
+
+- `PeekModel` reads the top-level model member without a full decode, for hosts
+  that route before converting.
+
+## [0.5.0] - 2026-10-13
+
+### Fixed
+
+- Aligned every dialect fold with the pinned reference version (LiteLLM
+  v1.100.1), including cache tokens, refusals, custom tools, reasoning joins and
+  structured output.
+
+## [0.4.11] - 2026-10-12
+
+### Fixed
+
+- Streaming: terminate once, and sign a thinking block before it closes.
+
+## [0.4.10] - 2026-10-10
+
+### Fixed
+
+- `chatresponses`: keep one assistant turn on one message.
+
+## [0.4.9] - 2026-10-09
+
+### Fixed
+
+- Length-truncated responses carry `incomplete_details.reason`.
+- `messagesresponses`: drop `reasoning.summary` when folding into Messages.
+
+## [0.4.8] - 2026-10-09
+
+### Fixed
+
+- `messagesresponses`: drop `reasoning.summary` when folding Responses into
+  Messages.
+
+## [0.4.7] - 2026-10-08
+
+### Added
+
+- `stream.ClassifyEvent` event facts and incremental SSE framing (`stream.Framer`).
+
+## [0.4.6] - 2026-10-08
+
+### Fixed
+
+- `chatresponses`: fold only the effort scalar into chat `reasoning_effort`.
+
+## [0.4.5] - 2026-09-26
+
+### Fixed
+
+- `chatresponses`: consolidate instructions and input system messages into a
+  single leading system message.
+
+## [0.4.4] - 2026-09-24
+
+### Fixed
+
+- Observe the source stream across reads, not one read at a time.
+
+## [0.4.3] - 2026-09-24
+
+### Fixed
+
+- Never close a fold the source did not close.
+
+## [0.4.2] - 2026-09-22
+
+### Fixed
+
+- Emit a real item lifecycle in the Responses stream folds.
+
+## [0.4.1] - 2026-09-18
+
+### Changed
+
+- Carry unsupported-parameter failures as a typed error (`UnsupportedParamError`),
+  not a string prefix.
+
+## [0.4.0] - 2026-09-18
+
+### Added
+
+- Host-injected `MaxTokensFallback` for conversions into Messages.
+
+## [0.3.0] - 2026-09-18
+
+### Added
+
+- `boundary_test.go`, which pins the public surface, the standard-library-only
+  rule, the vendor-vocabulary rule and the closed dialect set.
+
+## [0.2.0] - 2026-09-18
+
+### Added
+
+- `ConvertOptions` (`DropParams`, `MaxTokensFallback`).
+- Stream settlement metadata (`StreamResult`).
+- Protocol losses (`StaticLosses`, `BodyLosses`, `LossSet`).
+- A per-event hook on the stream options (`StreamOpts.OnEvent`).
+
+## [0.1.0] - 2026-09-18
+
+### Added
+
+- Initial release: JSON and SSE conversion between the `chat`, `messages` and
+  `responses` dialects.
+
+[Unreleased]: https://github.com/veildawn/ai-protocol/compare/v0.8.5...HEAD
+[0.8.5]: https://github.com/veildawn/ai-protocol/compare/v0.8.4...v0.8.5
+[0.8.4]: https://github.com/veildawn/ai-protocol/compare/v0.8.3...v0.8.4
+[0.8.3]: https://github.com/veildawn/ai-protocol/compare/v0.8.2...v0.8.3
+[0.8.2]: https://github.com/veildawn/ai-protocol/compare/v0.8.1...v0.8.2
+[0.8.1]: https://github.com/veildawn/ai-protocol/compare/v0.8.0...v0.8.1
+[0.8.0]: https://github.com/veildawn/ai-protocol/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/veildawn/ai-protocol/compare/v0.6.6...v0.7.0
+[0.6.6]: https://github.com/veildawn/ai-protocol/compare/v0.6.5...v0.6.6
+[0.6.5]: https://github.com/veildawn/ai-protocol/compare/v0.6.4...v0.6.5
+[0.6.4]: https://github.com/veildawn/ai-protocol/compare/v0.6.3...v0.6.4
+[0.6.3]: https://github.com/veildawn/ai-protocol/compare/v0.6.2...v0.6.3
+[0.6.2]: https://github.com/veildawn/ai-protocol/compare/v0.6.1...v0.6.2
+[0.6.1]: https://github.com/veildawn/ai-protocol/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/veildawn/ai-protocol/compare/v0.5.1...v0.6.0
+[0.5.1]: https://github.com/veildawn/ai-protocol/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/veildawn/ai-protocol/compare/v0.4.11...v0.5.0
+[0.4.11]: https://github.com/veildawn/ai-protocol/compare/v0.4.10...v0.4.11
+[0.4.10]: https://github.com/veildawn/ai-protocol/compare/v0.4.9...v0.4.10
+[0.4.9]: https://github.com/veildawn/ai-protocol/compare/v0.4.8...v0.4.9
+[0.4.8]: https://github.com/veildawn/ai-protocol/compare/v0.4.7...v0.4.8
+[0.4.7]: https://github.com/veildawn/ai-protocol/compare/v0.4.6...v0.4.7
+[0.4.6]: https://github.com/veildawn/ai-protocol/compare/v0.4.5...v0.4.6
+[0.4.5]: https://github.com/veildawn/ai-protocol/compare/v0.4.4...v0.4.5
+[0.4.4]: https://github.com/veildawn/ai-protocol/compare/v0.4.3...v0.4.4
+[0.4.3]: https://github.com/veildawn/ai-protocol/compare/v0.4.2...v0.4.3
+[0.4.2]: https://github.com/veildawn/ai-protocol/compare/v0.4.1...v0.4.2
+[0.4.1]: https://github.com/veildawn/ai-protocol/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/veildawn/ai-protocol/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/veildawn/ai-protocol/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/veildawn/ai-protocol/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/veildawn/ai-protocol/releases/tag/v0.1.0
