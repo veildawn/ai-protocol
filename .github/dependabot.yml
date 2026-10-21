@@ -1,0 +1,10 @@
+version: 2
+updates:
+  # The module itself has no dependencies; keep the actions that run the
+  # checks current instead.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "ci"
