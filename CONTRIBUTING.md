@@ -1,5 +1,7 @@
 # Contributing to ai-protocol
 
+[English](CONTRIBUTING.md) | [简体中文](CONTRIBUTING.zh-CN.md)
+
 Thanks for taking the time to contribute. This project is small on purpose, and
 the rules below are what keeps it small.
 
@@ -28,15 +30,16 @@ Run these before opening a pull request:
 
 ```sh
 make fmt-check   # gofmt
+make lint        # staticcheck
 make vet         # go vet
 make test        # go test ./...
-make cover       # coverage summary
+make cover-check # coverage floor
 make fuzz        # short fuzz run per target
 make bench       # benchmarks
 ```
 
 CI runs the same commands on Linux, against the oldest supported Go version and
-the latest stable one, plus `govulncheck`.
+the latest stable one, plus `govulncheck` and `staticcheck`.
 
 ## The boundary
 

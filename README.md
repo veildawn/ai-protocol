@@ -179,6 +179,9 @@ broken:
   credentials and quirks belong to the caller, not to the codec.
 - **No policy.** Routing, billing, quota and retry decisions stay outside.
 
+The reasoning behind each of these — and the trade-offs accepted — is in
+[docs/design.md](docs/design.md).
+
 ## Compatibility
 
 Mapping semantics are validated against [LiteLLM](https://github.com/BerriAI/litellm)
@@ -189,9 +192,11 @@ behavior are the `litellm_parity_*_test.go` files.
 ## Testing
 
 ```sh
-make test    # unit, compatibility, boundary and property tests
-make fuzz    # 10 seconds per target: conversions, SSE pipe, framer
-make bench   # conversion, pipe and framer benchmarks
+make test        # unit, compatibility, boundary and property tests
+make lint        # staticcheck
+make cover-check # statement coverage against the floor CI enforces
+make fuzz        # 10 seconds per target: conversions, SSE pipe, framer
+make bench       # conversion, pipe and framer benchmarks
 ```
 
 The fuzz targets treat the input as hostile: no request body, response body,
@@ -211,9 +216,10 @@ change it and a patch release does not.
 ## Contributing
 
 Bug reports, mapping fixes and new parity fixtures are welcome. See
-[CONTRIBUTING.md](CONTRIBUTING.md) for the build, test and boundary rules.
-Please read [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) first. For security
-issues, follow [SECURITY.md](SECURITY.md) instead of opening a public issue.
+[CONTRIBUTING.md](CONTRIBUTING.md) ([简体中文](CONTRIBUTING.zh-CN.md)) for the
+build, test and boundary rules. Please read
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) first. For security issues, follow
+[SECURITY.md](SECURITY.md) instead of opening a public issue.
 
 ## License
 

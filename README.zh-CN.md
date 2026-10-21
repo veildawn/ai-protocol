@@ -167,12 +167,16 @@ if losses[protocol.LossLogprobs] {
   codec。
 - **没有策略。** 路由、计费、配额和重试的决定都留在外面。
 
+每条保证背后的理由，以及接受的取舍，见 [docs/design.md](docs/design.md)。
+
 ## 测试
 
 ```sh
-make test    # 单元、兼容性、边界和属性测试
-make fuzz    # 每个目标模糊测试 10 秒：转换、SSE 管道、分帧器
-make bench   # 转换、管道和分帧器基准测试
+make test        # 单元、兼容性、边界和属性测试
+make lint        # staticcheck
+make cover-check # 对照 CI 强制的覆盖率门限
+make fuzz        # 每个目标模糊测试 10 秒：转换、SSE 管道、分帧器
+make bench       # 转换、管道和分帧器基准测试
 ```
 
 模糊测试把输入当成敌意数据：客户端或上游能产生的任何请求体、响应体、流或分块方
@@ -195,8 +199,9 @@ make bench   # 转换、管道和分帧器基准测试
 ## 参与贡献
 
 欢迎提交缺陷报告、映射修正和新的兼容性夹具。构建、测试和边界规则见
-[CONTRIBUTING.md](CONTRIBUTING.md)。请先阅读 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。
-安全问题请按 [SECURITY.md](SECURITY.md) 处理，不要开公开 issue。
+[CONTRIBUTING.zh-CN.md](CONTRIBUTING.zh-CN.md)（[English](CONTRIBUTING.md)）。
+请先阅读 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。安全问题请按
+[SECURITY.md](SECURITY.md) 处理，不要开公开 issue。
 
 ## 许可证
 
