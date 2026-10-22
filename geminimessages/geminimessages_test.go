@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/veildawn/ai-protocol/internal/jsonx"
+	"github.com/veildawn/ai-protocol/internal/thinksig"
 	"github.com/veildawn/ai-protocol/stream"
 )
 
@@ -33,6 +34,15 @@ func decode(t *testing.T, s string) map[string]any {
 		t.Fatal(err)
 	}
 	return m
+}
+
+func decodeAny(t *testing.T, s string) any {
+	t.Helper()
+	var v any
+	if err := json.Unmarshal([]byte(s), &v); err != nil {
+		t.Fatalf("decode %s: %v", s, err)
+	}
+	return normalize(v)
 }
 
 func normalize(v any) any {
@@ -491,5 +501,139 @@ func TestMessagesToGeminiUnresolvableMediaURLIsAnError(t *testing.T) {
 	  {"type":"document","source":{"type":"url","url":"https://my-proxy.example/noext"}}]}]}`)
 	if _, err := MessagesToGemini(doc, false); err == nil {
 		t.Fatal("an unresolvable document url was silently dropped")
+	}
+}
+
+// The stand-in signature this package's response folds write onto a thinking
+// block they rebuilt (internal/thinksig) is not a signature the target ever
+// issued. The target verifies every signature it is handed, so replaying the
+// stand-in is an INVALID_ARGUMENT — the 400 a gateway reports as a rejected
+// model request. The fold must send that block the way it sends one that
+// carried no signature at all: a bare thought part, and the call's own skip
+// marker.
+func TestMessagesToGeminiFoldStandInSignature(t *testing.T) {
+	fold := func(t *testing.T, sentinelSig, callSig string) map[string]any {
+		t.Helper()
+		body := decode(t, `{"model":"m","max_tokens":8,"messages":[
+		  {"role":"user","content":"q"},
+		  {"role":"assistant","content":[
+		    {"type":"thinking","thinking":"why","signature":"`+sentinelSig+`"},
+		    {"type":"text","text":"answer"},
+		    {"type":"tool_use","id":"t1","name":"f","input":{"a":1},
+		     "provider_specific_fields":{"signature":"`+callSig+`"}}]}]}`)
+		got, err := MessagesToGemini(body, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+
+	// A stand-in on the thought and on the call folds exactly like an absent
+	// one, so nothing the target could refuse rides out.
+	standIn := fold(t, thinksig.Synthetic, thinksig.Synthetic)
+	unsigned := fold(t, "", "")
+	assertEqual(t, standIn, unsigned, "stand-in folds like an unsigned block")
+
+	// The shape itself: bare thought part, skip marker on the replayed call.
+	assertEqual(t, standIn["contents"], decodeAny(t, `[
+	  {"role":"user","parts":[{"text":"q"}]},
+	  {"role":"model","parts":[
+	    {"text":"why","thought":true},
+	    {"text":"answer"},
+	    {"function_call":{"args":{"a":1},"name":"f"},
+	     "thoughtSignature":"skip_thought_signature_validator"}]}]`), "stand-in parts")
+
+	if encoded, err := json.Marshal(standIn); err != nil {
+		t.Fatal(err)
+	} else if strings.Contains(string(encoded), thinksig.Synthetic) {
+		t.Fatalf("the fold stand-in reached the target: %s", encoded)
+	}
+}
+
+// A thinking block that carries nothing but the stand-in (the empty block a
+// streaming start frame opens) folds to no part at all: it names no reasoning
+// and its signature is not one the target would accept.
+func TestMessagesToGeminiEmptyStandInBlockDropped(t *testing.T) {
+	body := decode(t, `{"model":"m","max_tokens":8,"messages":[
+	  {"role":"user","content":"q"},
+	  {"role":"assistant","content":[
+	    {"type":"thinking","thinking":"","signature":"`+thinksig.Synthetic+`"},
+	    {"type":"text","text":"answer"}]}]}`)
+	got, err := MessagesToGemini(body, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEqual(t, got["contents"], decodeAny(t, `[
+	  {"role":"user","parts":[{"text":"q"}]},
+	  {"role":"model","parts":[{"text":"answer"}]}]`), "empty stand-in dropped")
+}
+
+// The regression the stand-in caused end to end: a Gemini response whose
+// thought carries no signature folds to a Messages block signed with the
+// stand-in, and a client replays that block on the next turn. The replay must
+// reach the target without the stand-in.
+func TestFoldStandInDoesNotSurviveReplay(t *testing.T) {
+	resp := GeminiResponseToMessages(decode(t, `{"candidates":[{"content":{"role":"model","parts":[
+	   {"text":"why","thought":true},{"text":"answer"}]},"finishReason":"STOP","index":0}]}`))
+	blocks, _ := resp["content"].([]any)
+	if len(blocks) == 0 {
+		t.Fatalf("response folded to no content: %v", resp)
+	}
+	first, _ := blocks[0].(map[string]any)
+	if first["signature"] != thinksig.Synthetic {
+		t.Fatalf("the response fold no longer marks a rebuilt thought: %v", first)
+	}
+
+	body := map[string]any{
+		"model":      "m",
+		"max_tokens": 8,
+		"messages": []any{
+			map[string]any{"role": "user", "content": "q"},
+			map[string]any{"role": "assistant", "content": blocks},
+		},
+	}
+	got, err := MessagesToGemini(body, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), thinksig.Synthetic) {
+		t.Fatalf("a replayed stand-in reached the target: %s", encoded)
+	}
+}
+
+// The same rule on the streamed request fold: a signature delta that repeats
+// the stand-in contributes no thoughtSignature part, while a real signature
+// still rides its own part.
+func TestPipeMessagesToGeminiDropsStandInSignature(t *testing.T) {
+	pipe := func(t *testing.T, sig string) string {
+		t.Helper()
+		src := strings.Join([]string{
+			"event: message_start",
+			`data: {"type":"message_start","message":{"id":"m","usage":{"input_tokens":1}}}`,
+			"event: content_block_start",
+			`data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`,
+			"event: content_block_delta",
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"why"}}`,
+			"event: content_block_delta",
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"` + sig + `"}}`,
+			"event: message_stop",
+			`data: {"type":"message_stop"}`,
+		}, "\n\n") + "\n\n"
+		var dst bytes.Buffer
+		if _, err := PipeMessagesToGemini(&dst, strings.NewReader(src), StreamOpts{}); err != nil {
+			t.Fatalf("pipe: %v", err)
+		}
+		return dst.String()
+	}
+
+	if out := pipe(t, thinksig.Synthetic); strings.Contains(out, "thoughtSignature") {
+		t.Fatalf("the stand-in reached the target: %s", out)
+	}
+	if out := pipe(t, "SIG"); !strings.Contains(out, `"thoughtSignature":"SIG"`) {
+		t.Fatalf("a real signature was dropped: %s", out)
 	}
 }

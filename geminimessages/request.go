@@ -14,6 +14,7 @@ import (
 	"github.com/veildawn/ai-protocol/internal/cerr"
 	"github.com/veildawn/ai-protocol/internal/dialectvocab"
 	"github.com/veildawn/ai-protocol/internal/jsonx"
+	"github.com/veildawn/ai-protocol/internal/thinksig"
 	"github.com/veildawn/ai-protocol/types"
 )
 
@@ -412,9 +413,25 @@ func assistantFoldEntry(m map[string]any) (foldEntry, bool) {
 
 	var parts []any
 	for _, t := range thinks {
+		// The signature this package's response fold writes onto a thought it
+		// rebuilt is a stand-in, not something the target ever issued (see
+		// internal/thinksig): it exists so a Messages client keeps the block as
+		// thinking across a replay. The target validates every signature it is
+		// handed, so replaying the stand-in is an INVALID_ARGUMENT — the 400 a
+		// gateway reports as a rejected request. Fold it as an unsigned block
+		// instead — a bare thought part, the shape the reference produces for a
+		// block that carried no signature — and drop the part when it carries
+		// no text either, since it then says nothing at all.
+		sig := t.sig
+		if sig == thinksig.Synthetic {
+			sig = ""
+			if t.text == "" {
+				continue
+			}
+		}
 		part := map[string]any{"thought": true, "text": t.text}
-		if t.sig != "" {
-			part["thoughtSignature"] = t.sig
+		if sig != "" {
+			part["thoughtSignature"] = sig
 		}
 		parts = append(parts, part)
 	}
@@ -433,17 +450,18 @@ func assistantFoldEntry(m map[string]any) (foldEntry, bool) {
 		if u.hasArgs {
 			part["function_call"].(map[string]any)["args"] = u.args
 		}
-		if u.sig == "" {
+		if u.sig == "" || u.sig == thinksig.Synthetic {
 			// The target rejects a replayed functionCall part without a
 			// thoughtSignature (INVALID_ARGUMENT, verified against the live
 			// upstream), and it VALIDATES the value: a real signature from
 			// another part of the turn does not clear it, only the call's own
 			// does. A client that dropped the tool_use's
 			// provider_specific_fields (the common client behavior this fold
-			// was measured against) has nothing valid left to send, so the
-			// part carries the upstream's own skip marker — the sentinel it
-			// accepts in place of a signature — rather than a turn that
-			// cannot be replayed at all.
+			// was measured against) has nothing valid left to send, and a
+			// signature that is this package's own stand-in is no more
+			// verifiable than a missing one, so the part carries the upstream's
+			// own skip marker — the sentinel it accepts in place of a signature
+			// — rather than a turn that cannot be replayed at all.
 			u.sig = skipThoughtSignature
 		}
 		part["thoughtSignature"] = u.sig

@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.6] - 2026-10-22
+
+### Fixed
+
+- Gemini/Messages folds: a thinking block the client replays with the fold's
+  stand-in signature is folded as an unsigned block (a bare thought part)
+  rather than sent to the target as a signature it rejects — the 400 a gateway
+  reports as a rejected model request. The same stand-in on a replayed call
+  folds to the skip marker.
+
 ## [0.8.5] - 2026-10-17
 
 ### Fixed

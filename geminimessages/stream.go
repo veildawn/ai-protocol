@@ -144,8 +144,12 @@ func (s *messagesToGeminiState) feed(event string, obj map[string]any) []stream.
 			// signature rides a bare part — the reader collects a signature
 			// from any part, and a second copy of the text would double the
 			// reasoning the reader reconstructs (verified against the
-			// reference's reader during this audit).
-			if sig := jsonx.GetString(delta, "signature"); sig != "" {
+			// reference's reader during this audit). A signature that is this
+			// package's own stand-in is dropped for the same reason the body
+			// fold drops it: the target verifies what it is handed, and the
+			// stand-in is not a signature it ever issued (see
+			// internal/thinksig).
+			if sig := jsonx.GetString(delta, "signature"); sig != "" && sig != thinksig.Synthetic {
 				return s.partFrame(map[string]any{"thoughtSignature": sig})
 			}
 		case "input_json_delta":
