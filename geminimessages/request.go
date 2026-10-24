@@ -14,6 +14,7 @@ import (
 	"github.com/veildawn/ai-protocol/internal/cerr"
 	"github.com/veildawn/ai-protocol/internal/dialectvocab"
 	"github.com/veildawn/ai-protocol/internal/jsonx"
+	"github.com/veildawn/ai-protocol/internal/schemanorm"
 	"github.com/veildawn/ai-protocol/internal/thinksig"
 	"github.com/veildawn/ai-protocol/types"
 )
@@ -1472,6 +1473,9 @@ func geminiToolsToMessages(v any) []any {
 			continue
 		}
 		if decls, ok := jsonx.AsSlice(tool["function_declarations"]); ok {
+			// Same enum re-spelling as the chat fold: the Messages dialect's
+			// input_schema validates the lowercase vocabulary.
+			schemanorm.NormalizeTree(decls)
 			for _, d := range decls {
 				dm, ok := jsonx.AsMap(d)
 				if !ok {

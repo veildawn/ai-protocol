@@ -9,6 +9,7 @@ import (
 
 	"github.com/veildawn/ai-protocol/internal/cerr"
 	"github.com/veildawn/ai-protocol/internal/jsonx"
+	"github.com/veildawn/ai-protocol/internal/schemanorm"
 	"github.com/veildawn/ai-protocol/types"
 )
 
@@ -1561,6 +1562,9 @@ func geminiToolsToResponses(v any) []any {
 			continue
 		}
 		if decls, ok := jsonx.AsSlice(m["function_declarations"]); ok {
+			// Same enum re-spelling as the chat fold: the Responses dialect's
+			// parameters validate the lowercase vocabulary.
+			schemanorm.NormalizeTree(decls)
 			for _, d := range decls {
 				dm, ok := d.(map[string]any)
 				if !ok {

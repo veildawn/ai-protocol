@@ -9,6 +9,7 @@ import (
 
 	"github.com/veildawn/ai-protocol/internal/cerr"
 	"github.com/veildawn/ai-protocol/internal/jsonx"
+	"github.com/veildawn/ai-protocol/internal/schemanorm"
 	"github.com/veildawn/ai-protocol/types"
 )
 
@@ -1590,6 +1591,11 @@ func GeminiToChat(body map[string]any) (map[string]any, error) {
 				continue
 			}
 			if decls, ok := jsonx.AsSlice(tm["function_declarations"]); ok {
+				// The gemini wire spells its type enums in SCREAMING_SNAKE; the
+				// chat wire validates the lowercase JSON Schema vocabulary and
+				// refuses the uppercase spelling, so the relayed schema is
+				// normalized in place first.
+				schemanorm.NormalizeTree(decls)
 				for _, d := range decls {
 					dm, ok := jsonx.AsMap(d)
 					if !ok {

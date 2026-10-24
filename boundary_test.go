@@ -295,9 +295,10 @@ var boundarySurfaceAllowlist = map[string][]string{
 		"AnthropicHostedTools", "DefaultMaxTokens", "IsAnthropicHostedTool",
 		"IsResponsesOnlyTool", "ResponsesOnlyTools", "ThinkingBudget",
 	},
-	"internal/jsonx":    {"ArgsValue", "AsMap", "AsSlice", "Bool", "CloneMap", "GetString", "Int", "JoinText", "Marshal", "String", "UnmarshalMap"},
-	"internal/thinksig": {"Or", "Synthetic"},
-	"messagesresponses": {"MessagesResponseToResponses", "MessagesToResponses", "PipeMessagesToResponses", "PipeResponsesToMessages", "ResponsesRequestToMessages", "ResponsesToMessages", "StreamOpts"},
+	"internal/jsonx":      {"ArgsValue", "AsMap", "AsSlice", "Bool", "CloneMap", "GetString", "Int", "JoinText", "Marshal", "String", "UnmarshalMap"},
+	"internal/schemanorm": {"NormalizeTree"},
+	"internal/thinksig":   {"Or", "Synthetic"},
+	"messagesresponses":   {"MessagesResponseToResponses", "MessagesToResponses", "PipeMessagesToResponses", "PipeResponsesToMessages", "ResponsesRequestToMessages", "ResponsesToMessages", "StreamOpts"},
 	"protocol": {
 		"BodyLosses", "Chat", "ConversionError", "ConversionError.Error", "ConversionError.Unwrap",
 		"ConvertOptions", "ConvertRequest", "ConvertRequestWith", "ConvertResponse", "ConvertResponseWith",
