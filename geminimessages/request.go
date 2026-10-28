@@ -1578,11 +1578,9 @@ func applyGeminiParams(body, out map[string]any) error {
 		}
 	}
 	if jsonx.GetString(gc, "response_mime_type") == "application/json" {
-		schema, ok := jsonx.AsMap(gc["response_json_schema"])
-		if !ok {
-			schema, ok = jsonx.AsMap(gc["response_schema"])
-		}
-		if ok && len(schema) > 0 {
+		// The schema crosses enum-normalized — see ResponseSchemaOf for why a
+		// fold must not relay the gemini wire's uppercase spellings.
+		if schema, ok := schemanorm.ResponseSchemaOf(gc); ok {
 			out["output_format"] = map[string]any{
 				"type": "json_schema", "schema": schema, "strict": false,
 			}

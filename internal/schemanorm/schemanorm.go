@@ -2,6 +2,8 @@
 // the lowercase JSON Schema spellings every OpenAI-family dialect requires.
 package schemanorm
 
+import "github.com/veildawn/ai-protocol/internal/jsonx"
+
 // The gemini wire accepts SCREAMING_SNAKE type enums ("OBJECT", "STRING", …)
 // on a functionDeclarations schema — its native spelling. Every dialect a
 // gemini request folds onto (Chat, Messages, Responses) validates `type`
@@ -105,4 +107,32 @@ func normalizeSchemaNode(node map[string]any) bool {
 		}
 	}
 	return changed
+}
+
+// responseSchemaMembers lists the generation config's structured-output
+// schema members in precedence order: responseJsonSchema carries the standard
+// JSON Schema, responseSchema the wire's original member, and a config that
+// states both means the newer one.
+var responseSchemaMembers = []string{"response_json_schema", "response_schema"}
+
+// ResponseSchemaOf reads the generation config's structured-output schema and
+// returns it re-spelled: the same enum normalization NormalizeTree applies to
+// a declaration's parameters, on the config's own schema, in place. The
+// official SDKs state the type enums in the gemini wire's SCREAMING spelling
+// there too, and every target dialect validates lowercase — a strict upstream
+// answers the uppercase schema with a hard failure, the way it refuses an
+// uppercase declaration, so the response schema crosses a fold normalized or
+// not at all.
+//
+// A stated-but-empty schema counts as absent: the structured-output config
+// then degrades to the target's plain json_object request, the same reading
+// the folds apply to a schema member that is missing entirely.
+func ResponseSchemaOf(gc map[string]any) (map[string]any, bool) {
+	for _, member := range responseSchemaMembers {
+		if sm, ok := jsonx.AsMap(gc[member]); ok && len(sm) > 0 {
+			normalizeSchemaNode(sm)
+			return sm, true
+		}
+	}
+	return nil, false
 }

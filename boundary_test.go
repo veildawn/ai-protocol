@@ -296,7 +296,7 @@ var boundarySurfaceAllowlist = map[string][]string{
 		"IsResponsesOnlyTool", "ResponsesOnlyTools", "ThinkingBudget",
 	},
 	"internal/jsonx":       {"ArgsValue", "AsMap", "AsSlice", "Bool", "CloneMap", "GetString", "Int", "JoinText", "Marshal", "String", "UnmarshalMap"},
-	"internal/schemanorm":  {"NormalizeTree", "SchemaOf"},
+	"internal/schemanorm":  {"NormalizeTree", "ResponseSchemaOf", "SchemaOf"},
 	"internal/thinksig":    {"Or", "Synthetic"},
 	"internal/thinkingcfg": {"Budget", "Effort", "LevelBudget", "LevelBudgets"},
 	"messagesresponses":    {"MessagesResponseToResponses", "MessagesToResponses", "PipeMessagesToResponses", "PipeResponsesToMessages", "ResponsesRequestToMessages", "ResponsesToMessages", "StreamOpts"},

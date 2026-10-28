@@ -6,6 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-10-29
+
+### Fixed
+
+- Gemini folds: a structured-output schema is re-spelled before it leaves the
+  gemini wire, the way a declaration's parameters already were. The official
+  SDKs state the type enums in the wire's SCREAMING spelling on
+  `responseSchema` too, and the out-of-gemini folds relayed the config's schema
+  verbatim into the target's `json_schema` — a strict chat upstream validates
+  the lowercase JSON Schema vocabulary and answers the uppercase spelling with
+  a hard failure that reads as its own outage (measured live as a 5xx on every
+  schema-carrying structured-output request against one upstream, with each
+  failure also cooling the gateway's account breaker for that provider).
+  A stated-but-empty schema now degrades to the plain `json_object` request on
+  all three folds, the reading two of them already applied.
+
 ## [0.9.2] - 2026-10-28
 
 ### Fixed

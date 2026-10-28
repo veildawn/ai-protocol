@@ -1523,8 +1523,9 @@ func thinkingConfigToEffort(v any) (string, bool) {
 func responseMimeToText(gc map[string]any) map[string]any {
 	switch jsonx.GetString(gc, "response_mime_type") {
 	case "application/json":
-		schema := firstNonNil(gc["response_json_schema"], gc["response_schema"])
-		if sm, ok := schema.(map[string]any); ok && len(sm) > 0 {
+		// The schema crosses enum-normalized — see ResponseSchemaOf for why a
+		// fold must not relay the gemini wire's uppercase spellings.
+		if sm, ok := schemanorm.ResponseSchemaOf(gc); ok {
 			return map[string]any{"format": map[string]any{
 				"type": "json_schema", "name": "response_schema", "schema": sm, "strict": false,
 			}}

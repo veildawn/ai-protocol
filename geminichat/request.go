@@ -1673,15 +1673,12 @@ func thinkingConfigToEffort(tc map[string]any) (string, bool) {
 
 // wireResponseFormat reads the structured-output config back into a chat
 // response_format. A json mime with no schema can only have come from a bare
-// json_object request, so it folds back to that.
+// json_object request, so it folds back to that; a schema crosses through
+// ResponseSchemaOf, enum-normalized the way a declaration's parameters are.
 func wireResponseFormat(gc map[string]any) map[string]any {
 	switch jsonx.GetString(gc, "response_mime_type") {
 	case "application/json":
-		schema := gc["response_json_schema"]
-		if schema == nil {
-			schema = gc["response_schema"]
-		}
-		if sm, ok := schema.(map[string]any); ok && schema != nil {
+		if sm, ok := schemanorm.ResponseSchemaOf(gc); ok {
 			return map[string]any{"type": "json_schema", "json_schema": map[string]any{
 				"name": "response_schema", "schema": sm, "strict": false,
 			}}

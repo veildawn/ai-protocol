@@ -606,3 +606,45 @@ func TestGeminiToChatCarriesThinkingLevel(t *testing.T) {
 		})
 	}
 }
+
+// A structured-output schema crosses the fold enum-normalized: the official
+// SDKs state the gemini wire's SCREAMING type enums on responseSchema too,
+// and a strict chat upstream refuses them (zhipu's GLM answers the uppercase
+// schema with a 5xx), the way it refuses an uppercase declaration schema.
+func TestGeminiToChatResponseSchemaEnumsNormalize(t *testing.T) {
+	obj, err := jsonx.UnmarshalMap([]byte(
+		`{"contents":[{"role":"user","parts":[{"text":"q"}]}],` +
+			`"generationConfig":{"response_mime_type":"application/json","response_schema":` +
+			`{"type":"OBJECT","properties":{"city":{"type":"STRING"},"tags":{"type":"ARRAY","items":{"type":"STRING"}}}}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := GeminiToChat(obj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rf, _ := jsonx.AsMap(out["response_format"])
+	if got := jsonx.GetString(rf, "type"); got != "json_schema" {
+		t.Fatalf("response_format.type = %q", got)
+	}
+	js, _ := jsonx.AsMap(rf["json_schema"])
+	if got := mustJSON(js["schema"]); got != `{"properties":{"city":{"type":"string"},"tags":{"items":{"type":"string"},"type":"array"}},"type":"object"}` {
+		t.Fatalf("schema was not re-spelled: %s", got)
+	}
+	// A stated-but-empty schema is no constraint at all: the mime alone folds
+	// to the plain json_object request rather than an empty json_schema.
+	obj, err = jsonx.UnmarshalMap([]byte(
+		`{"contents":[{"role":"user","parts":[{"text":"q"}]}],` +
+			`"generationConfig":{"response_mime_type":"application/json","response_schema":{}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err = GeminiToChat(obj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rf, _ = jsonx.AsMap(out["response_format"])
+	if got := jsonx.GetString(rf, "type"); got != "json_object" {
+		t.Fatalf("empty schema folded to %q, want json_object", got)
+	}
+}

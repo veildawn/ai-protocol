@@ -700,3 +700,33 @@ func TestGeminiToMessagesReadsJsonSchemaToolSpelling(t *testing.T) {
 		})
 	}
 }
+
+// A structured-output schema crosses the fold enum-normalized: the official
+// SDKs state the gemini wire's SCREAMING type enums on responseSchema too,
+// and a strict Messages upstream validates lowercase JSON Schema vocabulary.
+func TestGeminiToMessagesResponseSchemaEnumsNormalize(t *testing.T) {
+	obj, err := jsonx.UnmarshalMap([]byte(
+		`{"contents":[{"role":"user","parts":[{"text":"q"}]}],` +
+			`"generationConfig":{"response_mime_type":"application/json","response_schema":` +
+			`{"type":"OBJECT","properties":{"city":{"type":"STRING"}}}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := GeminiToMessages(obj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	of, _ := jsonx.AsMap(out["output_format"])
+	if of == nil {
+		t.Fatalf("no output_format: %v", out)
+	}
+	schema, _ := jsonx.AsMap(of["schema"])
+	if jsonx.GetString(schema, "type") != "object" {
+		t.Fatalf("schema root type = %v, want re-spelled object", schema["type"])
+	}
+	props, _ := jsonx.AsMap(schema["properties"])
+	city, _ := jsonx.AsMap(props["city"])
+	if jsonx.GetString(city, "type") != "string" {
+		t.Fatalf("city type = %v, want re-spelled string", city["type"])
+	}
+}
