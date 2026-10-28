@@ -570,3 +570,43 @@ func TestGeminiToResponsesCarriesThinkingLevel(t *testing.T) {
 		t.Fatalf("reasoning.effort = %q, want high: %s", got, enc)
 	}
 }
+
+// A declaration's schema may ride the standard-JSON-Schema member the official
+// SDKs state — camel or snake — rather than the legacy OpenAPI subset; the
+// fold reads whichever member is present onto the function tool's parameters.
+func TestGeminiToResponsesReadsJsonSchemaToolSpelling(t *testing.T) {
+	for _, tc := range []struct{ name, member string }{
+		{"camel", "parametersJsonSchema"},
+		{"snake", "parameters_json_schema"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			obj, err := jsonx.UnmarshalMap([]byte(
+				`{"contents":[{"role":"user","parts":[{"text":"q"}]}],` +
+					`"tools":[{"function_declarations":[{"name":"lookup","description":"d","` + tc.member + `":` +
+					`{"type":"object","properties":{"q":{"type":"string"}},"additionalProperties":false}}]}]}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			out, err := GeminiToResponses(obj)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tools, _ := jsonx.AsSlice(out["tools"])
+			if len(tools) != 1 {
+				enc, _ := json.Marshal(out)
+				t.Fatalf("tools = %s", enc)
+			}
+			tool, _ := jsonx.AsMap(tools[0])
+			params, _ := jsonx.AsMap(tool["parameters"])
+			if params == nil {
+				enc, _ := json.Marshal(out)
+				t.Fatalf("the schema was dropped: %s", enc)
+			}
+			props, _ := jsonx.AsMap(params["properties"])
+			if _, ok := props["q"]; !ok {
+				enc, _ := json.Marshal(out)
+				t.Errorf("the schema's properties were dropped: %s", enc)
+			}
+		})
+	}
+}

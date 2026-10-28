@@ -1571,7 +1571,7 @@ func geminiToolsToResponses(v any) []any {
 				} else {
 					tool["description"] = ""
 				}
-				if params, ok := dm["parameters"]; ok && params != nil {
+				if params, ok := schemanorm.SchemaOf(dm); ok {
 					tool["parameters"] = params
 				} else {
 					tool["parameters"] = map[string]any{"type": "object"}

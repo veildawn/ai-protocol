@@ -216,6 +216,65 @@ func TestGeminiToChatSignatureReadsEitherSpelling(t *testing.T) {
 	}
 }
 
+// A declaration's schema may ride the standard-JSON-Schema member the official
+// SDKs state — camel or snake — rather than the legacy OpenAPI subset; the
+// fold reads whichever member is present, and the legacy one wins when a
+// declaration states both.
+func TestGeminiToChatReadsJsonSchemaToolSpelling(t *testing.T) {
+	for _, tc := range []struct{ name, member string }{
+		{"camel", "parametersJsonSchema"},
+		{"snake", "parameters_json_schema"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			obj, err := jsonx.UnmarshalMap([]byte(
+				`{"contents":[{"role":"user","parts":[{"text":"q"}]}],` +
+					`"tools":[{"function_declarations":[{"name":"lookup","description":"d","` + tc.member + `":` +
+					`{"type":"object","properties":{"q":{"type":"string"}},"additionalProperties":false}}]}]}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			out, err := GeminiToChat(obj)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tools, _ := jsonx.AsSlice(out["tools"])
+			if len(tools) != 1 {
+				t.Fatalf("tools = %s", mustJSON(out))
+			}
+			tool, _ := jsonx.AsMap(tools[0])
+			fn, _ := jsonx.AsMap(tool["function"])
+			params, _ := jsonx.AsMap(fn["parameters"])
+			if params == nil {
+				t.Fatalf("the schema was dropped: %s", mustJSON(out))
+			}
+			props, _ := jsonx.AsMap(params["properties"])
+			if _, ok := props["q"]; !ok {
+				t.Errorf("the schema's properties were dropped: %s", mustJSON(out))
+			}
+		})
+	}
+	obj, err := jsonx.UnmarshalMap([]byte(
+		`{"contents":[{"role":"user","parts":[{"text":"q"}]}],` +
+			`"tools":[{"function_declarations":[{"name":"lookup",` +
+			`"parameters":{"type":"object","properties":{"legacy":{"type":"string"}}},` +
+			`"parametersJsonSchema":{"type":"object","properties":{"json":{"type":"string"}}}}]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := GeminiToChat(obj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools, _ := jsonx.AsSlice(out["tools"])
+	tool, _ := jsonx.AsMap(tools[0])
+	fn, _ := jsonx.AsMap(tool["function"])
+	params, _ := jsonx.AsMap(fn["parameters"])
+	props, _ := jsonx.AsMap(params["properties"])
+	if _, ok := props["legacy"]; !ok {
+		t.Errorf("the legacy member did not win: %s", mustJSON(out))
+	}
+}
+
 // A media-only user turn gains the blank text part the target requires, and a
 // data URL folds to inline bytes.
 func TestChatToGeminiMediaBlankText(t *testing.T) {

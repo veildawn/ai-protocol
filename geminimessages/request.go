@@ -1486,7 +1486,7 @@ func geminiToolsToMessages(v any) []any {
 				if desc, ok := dm["description"]; ok && desc != nil {
 					t["description"] = desc
 				}
-				if params, ok := dm["parameters"]; ok {
+				if params, ok := schemanorm.SchemaOf(dm); ok {
 					t["input_schema"] = params
 				} else {
 					// The Messages dialect requires a schema on every tool; a

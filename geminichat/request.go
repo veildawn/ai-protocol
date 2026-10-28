@@ -1605,7 +1605,7 @@ func GeminiToChat(body map[string]any) (map[string]any, error) {
 					if v, ok := dm["description"]; ok && v != nil {
 						fn["description"] = v
 					}
-					if v, ok := dm["parameters"]; ok && v != nil {
+					if v, ok := schemanorm.SchemaOf(dm); ok {
 						fn["parameters"] = v
 					}
 					toolsList = append(toolsList, map[string]any{"type": "function", "function": fn})

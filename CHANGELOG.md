@@ -6,6 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-10-28
+
+### Fixed
+
+- Gemini folds: a declaration's schema is read whichever member carries it.
+  The wire's original `parameters` (an OpenAPI-subset Schema) gained a
+  standard-JSON-Schema sibling the official SDKs state — `parametersJsonSchema`
+  lowerCamel, `parameters_json_schema` snake — and the out-of-gemini folds read
+  only the legacy member, so a client stating the newer one handed the target a
+  schema-less declaration: the model was told a tool existed but not what it
+  takes, and answered with a tool call written as plain text instead of a
+  structured call the client could execute. Observed 2026-10-28 as 21 tools
+  folded with 22KB of schemas silently gone on a DeepSeek upstream. The legacy
+  member wins when a declaration states both.
+
 ## [0.9.1] - 2026-10-28
 
 ### Fixed

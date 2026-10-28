@@ -10,6 +10,19 @@ package schemanorm
 // schema it relays. The rewrite is pure dialect mechanics — no host policy —
 // which is why it lives in the codec rather than at a gateway seam.
 
+// A declaration's schema rides one of three members. `parameters` is the
+// wire's original OpenAPI-subset Schema; `parametersJsonSchema` and its snake
+// spelling carry a standard JSON Schema instead — the member the official
+// SDKs now document, and protobuf's JSON mapping takes lowerCamel and snake
+// alike, so a fold that reads only `parameters` hands the target a schema-less
+// declaration whenever a client states the newer member. SchemaOf resolves
+// the three spellings so every out-of-gemini fold reads one shape; the legacy
+// member wins when a declaration states both, because it is the one the
+// reference bridge reads first.
+
+// schemaMembers lists the declaration's schema members in precedence order.
+var schemaMembers = []string{"parameters", "parameters_json_schema", "parametersJsonSchema"}
+
 // geminiEnumSpellings maps the gemini wire's type enums to the lowercase
 // spellings. Unmapped keys pass through untouched.
 var geminiEnumSpellings = map[string]string{
@@ -21,10 +34,22 @@ var geminiEnumSpellings = map[string]string{
 	"BOOLEAN": "boolean",
 }
 
+// SchemaOf returns the declaration's parameters schema, resolved across the
+// wire's three spellings of the member. A stated-but-null schema counts as
+// absent, so a fold that must state one anyway falls to its own default.
+func SchemaOf(decl map[string]any) (any, bool) {
+	for _, member := range schemaMembers {
+		if v, ok := decl[member]; ok && v != nil {
+			return v, true
+		}
+	}
+	return nil, false
+}
+
 // NormalizeTree walks a decoded tool-declaration list re-spelling every
-// "type" member under each declaration's parameters schema. It reports
-// whether anything moved, so a caller that normalizes in place can keep the
-// original bytes when nothing did.
+// "type" member under each declaration's parameters schema, whichever member
+// carries it. It reports whether anything moved, so a caller that normalizes
+// in place can keep the original bytes when nothing did.
 func NormalizeTree(declarations []any) bool {
 	changed := false
 	for _, raw := range declarations {
@@ -32,8 +57,10 @@ func NormalizeTree(declarations []any) bool {
 		if !ok {
 			continue
 		}
-		if params, ok := dm["parameters"].(map[string]any); ok {
-			changed = normalizeSchemaNode(params) || changed
+		if params, ok := SchemaOf(dm); ok {
+			if node, isMap := params.(map[string]any); isMap {
+				changed = normalizeSchemaNode(node) || changed
+			}
 		}
 	}
 	return changed

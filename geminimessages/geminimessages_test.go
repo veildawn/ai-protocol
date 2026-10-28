@@ -662,3 +662,41 @@ func TestGeminiToMessagesCarriesThinkingLevel(t *testing.T) {
 		t.Fatalf("thinking.budget_tokens = %v, want the high budget: %s", thinking["budget_tokens"], mustJSON(out))
 	}
 }
+
+// A declaration's schema may ride the standard-JSON-Schema member the official
+// SDKs state — camel or snake — rather than the legacy OpenAPI subset; the
+// fold reads whichever member is present onto input_schema, and a declaration
+// that stated none still gets the permissive object the target requires.
+func TestGeminiToMessagesReadsJsonSchemaToolSpelling(t *testing.T) {
+	for _, tc := range []struct{ name, member string }{
+		{"camel", "parametersJsonSchema"},
+		{"snake", "parameters_json_schema"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			obj, err := jsonx.UnmarshalMap([]byte(
+				`{"contents":[{"role":"user","parts":[{"text":"q"}]}],` +
+					`"tools":[{"function_declarations":[{"name":"lookup","description":"d","` + tc.member + `":` +
+					`{"type":"object","properties":{"q":{"type":"string"}},"additionalProperties":false}}]}]}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			out, err := GeminiToMessages(obj)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tools, _ := jsonx.AsSlice(out["tools"])
+			if len(tools) != 1 {
+				t.Fatalf("tools = %s", mustJSON(out))
+			}
+			tool, _ := jsonx.AsMap(tools[0])
+			schema, _ := jsonx.AsMap(tool["input_schema"])
+			if schema == nil {
+				t.Fatalf("the schema was dropped: %s", mustJSON(out))
+			}
+			props, _ := jsonx.AsMap(schema["properties"])
+			if _, ok := props["q"]; !ok {
+				t.Errorf("the schema's properties were dropped: %s", mustJSON(out))
+			}
+		})
+	}
+}
