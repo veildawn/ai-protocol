@@ -637,3 +637,28 @@ func TestPipeMessagesToGeminiDropsStandInSignature(t *testing.T) {
 		t.Fatalf("a real signature was dropped: %s", out)
 	}
 }
+
+// Gemini 3's thinkingLevel must reach the Messages wire as a budget. This is the
+// third reader the shared package replaced: all three used to consult
+// thinkingBudget alone, so a level-bearing history folded to "thinking enabled,
+// no budget" here and to a specific depth elsewhere.
+func TestGeminiToMessagesCarriesThinkingLevel(t *testing.T) {
+	obj, err := jsonx.UnmarshalMap([]byte(
+		`{"contents":[{"role":"user","parts":[{"text":"q"}]}],` +
+			`"generationConfig":{"thinkingConfig":{"thinkingLevel":"HIGH","includeThoughts":true}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := GeminiToMessages(obj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	thinking, _ := jsonx.AsMap(out["thinking"])
+	if got := jsonx.GetString(thinking, "type"); got != "enabled" {
+		t.Fatalf("thinking.type = %q, want enabled: %s", got, mustJSON(out))
+	}
+	budget, ok := jsonx.Int(thinking["budget_tokens"])
+	if !ok || budget <= 0 {
+		t.Fatalf("thinking.budget_tokens = %v, want the high budget: %s", thinking["budget_tokens"], mustJSON(out))
+	}
+}

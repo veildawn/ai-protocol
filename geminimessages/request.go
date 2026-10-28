@@ -15,6 +15,7 @@ import (
 	"github.com/veildawn/ai-protocol/internal/dialectvocab"
 	"github.com/veildawn/ai-protocol/internal/jsonx"
 	"github.com/veildawn/ai-protocol/internal/schemanorm"
+	"github.com/veildawn/ai-protocol/internal/thinkingcfg"
 	"github.com/veildawn/ai-protocol/internal/thinksig"
 	"github.com/veildawn/ai-protocol/types"
 )
@@ -1555,7 +1556,7 @@ func applyGeminiParams(body, out map[string]any) error {
 	if v, ok := gc["max_output_tokens"]; ok {
 		out["max_tokens"] = v
 	} else if tc, ok := jsonx.AsMap(gc["thinkingConfig"]); ok {
-		if budget, ok := jsonx.Int(tc["thinkingBudget"]); ok && budget > 0 {
+		if budget, ok := thinkingcfg.Budget(tc); ok && budget > 0 {
 			out["max_tokens"] = budget + dialectvocab.DefaultMaxTokens
 		}
 	}
@@ -1567,7 +1568,7 @@ func applyGeminiParams(body, out map[string]any) error {
 			// The budget is bucketed back through the effort ladder the
 			// forward fold uses, so the value written is the one the ladder
 			// reproduces — not the raw source number.
-			if budget, ok := jsonx.Int(tc["thinkingBudget"]); ok {
+			if budget, ok := thinkingcfg.Budget(tc); ok {
 				effort := types.EffortFromBudget(budget)
 				if canonical, _, err := thinkingBudgetForEffort(effort); err == nil {
 					thinking["budget_tokens"] = canonical

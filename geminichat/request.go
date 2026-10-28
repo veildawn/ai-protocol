@@ -10,7 +10,7 @@ import (
 	"github.com/veildawn/ai-protocol/internal/cerr"
 	"github.com/veildawn/ai-protocol/internal/jsonx"
 	"github.com/veildawn/ai-protocol/internal/schemanorm"
-	"github.com/veildawn/ai-protocol/types"
+	"github.com/veildawn/ai-protocol/internal/thinkingcfg"
 )
 
 // chatVocabulary is the Chat dialect's request vocabulary: the parameters a
@@ -1664,15 +1664,11 @@ func serviceTierFromWire(v string) string {
 }
 
 // thinkingConfigToEffort reads a thinkingConfig back into the effort label a
-// chat request asks with. Disabled thinking is "none"; anything else buckets
-// the budget the same way the shared effort thresholds do — the bucket is what
-// the chat wire can say, not the raw budget.
+// chat request asks with. The reading itself lives in internal/thinkingcfg,
+// which is the one place that knows both spellings a gemini wire states depth
+// in — see it for why the answer is false when the config names no depth.
 func thinkingConfigToEffort(tc map[string]any) (string, bool) {
-	if b, ok := tc["includeThoughts"].(bool); ok && !b {
-		return "none", true
-	}
-	budget, _ := jsonx.Int(tc["thinkingBudget"])
-	return types.EffortFromBudget(budget), true
+	return thinkingcfg.Effort(tc)
 }
 
 // wireResponseFormat reads the structured-output config back into a chat
@@ -1775,6 +1771,10 @@ func geminiContentsToChatMessages(contents []any) []any {
 						}
 					}
 				}
+				// A response that names an id the client was handed must pair
+				// with the id the wire actually carries for that call, which
+				// gains the signature suffix above. See signedCallID.
+				id = signedCallID(calls, id)
 				if id == "" {
 					id = fmt.Sprintf("call_%d", callSeq)
 					callSeq++
@@ -2022,6 +2022,41 @@ func firstNonEmpty(a, b string) string {
 // callRef remembers one folded call — the name a result pairs against and the
 // id the chat wire carries for it.
 type callRef struct{ name, id string }
+
+// signedCallID maps the id a functionResponse names onto the id the chat wire
+// carries for the call it answers, resolving the thought-signature suffix.
+//
+// A replayed call whose part carried a thoughtSignature rides the chat wire as
+// "<id>__thought__<sig>" — that suffix is how a LATER fold recovers the
+// signature when the client dropped provider_specific_fields. The
+// functionResponse answering the call, however, names the bare "<id>": on the
+// gemini wire the signature rides the call, never the result, so the bare id is
+// the only one the caller was ever handed. Writing it verbatim leaves a tool
+// message that answers no call, and the pair is lost:
+//
+//	assistant tool_calls[0].id = "call_2138938__thought__<sig>"
+//	tool.tool_call_id          = "call_2138938"        ← answers nothing
+//
+// An exact id still wins, so a history carrying both "call_1" and
+// "call_1__thought__x" keeps them apart; the suffix scan is the fallback, most
+// recent call first, because that is the exchange being replayed.
+func signedCallID(calls []callRef, id string) string {
+	if id == "" {
+		return id
+	}
+	for i := len(calls) - 1; i >= 0; i-- {
+		if calls[i].id == id {
+			return id
+		}
+	}
+	prefix := id + thoughtSignatureSeparator
+	for i := len(calls) - 1; i >= 0; i-- {
+		if strings.HasPrefix(calls[i].id, prefix) {
+			return calls[i].id
+		}
+	}
+	return id
+}
 
 // imageURLPart is the chat content spelling of a media reference.
 func imageURLPart(url string) map[string]any {

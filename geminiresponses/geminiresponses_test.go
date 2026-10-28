@@ -548,3 +548,25 @@ func TestResponsesToGeminiDeveloperRole(t *testing.T) {
 		"system_instruction": {"parts": [{"text": "Base instruction."}, {"text": "Developer rule."}]}
 	}`)
 }
+
+// Gemini 3's thinkingLevel must reach the Responses wire as an effort. The
+// shared reader in internal/thinkingcfg is what makes this fold and the chat one
+// agree; before it, a level-bearing body folded to no reasoning at all here and
+// to a budget on the chat path.
+func TestGeminiToResponsesCarriesThinkingLevel(t *testing.T) {
+	obj, err := jsonx.UnmarshalMap([]byte(
+		`{"contents":[{"role":"user","parts":[{"text":"q"}]}],` +
+			`"generationConfig":{"thinkingConfig":{"thinkingLevel":"HIGH","includeThoughts":true}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := GeminiToResponses(obj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reasoning, _ := jsonx.AsMap(out["reasoning"])
+	if got := jsonx.GetString(reasoning, "effort"); got != "high" {
+		enc, _ := json.Marshal(out)
+		t.Fatalf("reasoning.effort = %q, want high: %s", got, enc)
+	}
+}

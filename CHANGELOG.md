@@ -6,6 +6,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-10-28
+
+### Fixed
+
+- Gemini/Chat folds: a `functionResponse` that names its id now pairs with the
+  call it answers. A replayed call carrying a thoughtSignature rides the chat
+  wire as `<id>__thought__<sig>` while the result names the bare `<id>` — the
+  only one the client was handed, since the signature rides the call and not the
+  result on the gemini wire. Writing the bare id left a tool message that
+  answered nothing: every signed call in a replayed history read as unanswered
+  and the whole turn was refused. Observed 2026-10-28 as thirteen dropped calls
+  on a 101,780-token request. An exact id still outranks the suffix scan.
+
+- Gemini folds: `thinkingLevel` is read. Gemini 3 states depth as a named level
+  where the codec knew only `thinkingBudget`; the absent budget bucketed as the
+  shallowest rung, so a client asking for the deepest reasoning received the
+  shallowest and the request SUCCEEDED — no error, and the usage row recorded
+  `minimal` as if that had been the ask.
+
+- Gemini folds: a `thinkingConfig` that states no depth no longer answers the
+  lowest rung. "Thinking on, depth unspecified" is a request for the target's
+  default; turning it into `minimal` substituted this codec's choice for the
+  client's. The chat, messages and responses folds now share one reader
+  (`internal/thinkingcfg`) instead of three copies that had already drifted.
+
 ## [0.8.6] - 2026-10-22
 
 ### Fixed

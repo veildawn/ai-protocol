@@ -10,7 +10,7 @@ import (
 	"github.com/veildawn/ai-protocol/internal/cerr"
 	"github.com/veildawn/ai-protocol/internal/jsonx"
 	"github.com/veildawn/ai-protocol/internal/schemanorm"
-	"github.com/veildawn/ai-protocol/types"
+	"github.com/veildawn/ai-protocol/internal/thinkingcfg"
 )
 
 // thoughtSeparator is the marker the reference embeds in a tool call id to
@@ -1504,25 +1504,16 @@ func compactJSON(v any) string {
 	return string(b)
 }
 
-// thinkingConfigToEffort buckets a thinking config back into an effort level:
-// thoughts switched off is `none`, and a budget maps onto the level whose
-// budget it meets. A config carrying neither states nothing to replay.
+// thinkingConfigToEffort buckets a thinking config back into an effort level.
+// The reading lives in internal/thinkingcfg — the one place that knows both
+// spellings a gemini wire states depth in (budget and thinkingLevel), so this
+// fold and the chat one cannot disagree about what a config means.
 func thinkingConfigToEffort(v any) (string, bool) {
 	tc, ok := jsonx.AsMap(v)
 	if !ok {
 		return "", false
 	}
-	if inc, ok := tc["includeThoughts"]; ok {
-		if b, isBool := jsonx.Bool(inc); isBool && !b {
-			return "none", true
-		}
-	}
-	if bud, ok := tc["thinkingBudget"]; ok {
-		if n, ok := jsonx.Int(bud); ok {
-			return types.EffortFromBudget(n), true
-		}
-	}
-	return "", false
+	return thinkingcfg.Effort(tc)
 }
 
 // responseMimeToText rebuilds the Responses text.format from the generation

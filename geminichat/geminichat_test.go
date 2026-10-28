@@ -446,3 +446,104 @@ func TestPipeChatToGeminiTruncation(t *testing.T) {
 		t.Fatalf("delivered content lost:\n%s", dst.String())
 	}
 }
+
+// The case the test above cannot see: a functionResponse that NAMES its id.
+//
+// On the gemini wire the thought signature rides the call part, never the
+// result, so a client that replays a signed history sends
+//
+//	{"functionCall":{"id":"call_1",...},"thoughtSignature":"SIG"}
+//	{"functionResponse":{"id":"call_1",...}}
+//
+// The call rides the chat wire as "call_1__thought__SIG"; the result names the
+// bare "call_1" the client was handed. Writing it verbatim leaves a tool message
+// that answers nothing — and a strict upstream then takes the whole turn down,
+// which is what a gateway reports as a rejected model request. Observed
+// 2026-10-28: a Gemini client folded onto a chat upstream replayed thirteen
+// signed calls, every one dropped as unanswered, 101,780 tokens billed for 18
+// tokens of placeholder prose.
+func TestGeminiToChatSignedCallResultStillPairs(t *testing.T) {
+	obj, err := jsonx.UnmarshalMap([]byte(`{"contents":[
+		{"role":"user","parts":[{"text":"q"}]},
+		{"role":"model","parts":[{"function_call":{"id":"call_1","name":"f","args":{"a":1}},"thoughtSignature":"SIG"}]},
+		{"role":"user","parts":[{"function_response":{"id":"call_1","name":"f","response":{"content":"r"}}}]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := GeminiToChat(obj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgs, _ := jsonx.AsSlice(out["messages"])
+	if len(msgs) != 3 {
+		t.Fatalf("messages = %d, want 3: %s", len(msgs), mustJSON(out))
+	}
+	assistant, _ := jsonx.AsMap(msgs[1])
+	calls, _ := jsonx.AsSlice(assistant["tool_calls"])
+	if len(calls) != 1 {
+		t.Fatalf("the call was lost: %s", mustJSON(out))
+	}
+	callOne, _ := jsonx.AsMap(calls[0])
+	callID := jsonx.GetString(callOne, "id")
+	tool, _ := jsonx.AsMap(msgs[2])
+	if got := jsonx.GetString(tool, "tool_call_id"); got != callID {
+		t.Fatalf("result answers %q but the call is %q: %s", got, callID, mustJSON(out))
+	}
+	// The suffix is what carries the signature to the next fold; pairing must
+	// not cost it.
+	if !strings.HasSuffix(callID, thoughtSignatureSeparator+"SIG") {
+		t.Fatalf("the signature suffix was dropped from the call id: %q", callID)
+	}
+}
+
+// An exact id outranks the signature scan: a history holding both "call_1" and
+// "call_1__thought__SIG" must not have the bare result stolen by the signed call.
+func TestGeminiToChatExactIDOutranksSignatureSuffix(t *testing.T) {
+	obj, err := jsonx.UnmarshalMap([]byte(`{"contents":[
+		{"role":"user","parts":[{"text":"q"}]},
+		{"role":"model","parts":[
+			{"function_call":{"id":"call_1","name":"a","args":{}}},
+			{"function_call":{"id":"call_1","name":"b","args":{}},"thoughtSignature":"SIG"}]},
+		{"role":"user","parts":[{"function_response":{"id":"call_1","name":"a","response":{"content":"r"}}}]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := GeminiToChat(obj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgs, _ := jsonx.AsSlice(out["messages"])
+	tool, _ := jsonx.AsMap(msgs[2])
+	if got := jsonx.GetString(tool, "tool_call_id"); got != "call_1" {
+		t.Fatalf("the bare result was paired to %q, want call_1: %s", got, mustJSON(out))
+	}
+}
+
+// Gemini 3 states depth as thinkingLevel; the chat fold must carry it as the
+// effort the upstream is asked for. Before the shared reader learned the
+// spelling, this body folded with no reasoning_effort at all (after) or the
+// shallowest one (before) — a request that SUCCEEDS at minimum depth is worse
+// than one that fails, because nothing reports the loss. Observed 2026-10-28.
+func TestGeminiToChatCarriesThinkingLevel(t *testing.T) {
+	for _, tc := range []struct{ level, want string }{
+		{"HIGH", "high"},
+		{"LOW", "low"},
+		{"MEDIUM", "medium"},
+	} {
+		t.Run(tc.level, func(t *testing.T) {
+			obj, err := jsonx.UnmarshalMap([]byte(
+				`{"contents":[{"role":"user","parts":[{"text":"q"}]}],` +
+					`"generationConfig":{"thinkingConfig":{"thinkingLevel":"` + tc.level + `","includeThoughts":true}}}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			out, err := GeminiToChat(obj)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := jsonx.GetString(out, "reasoning_effort"); got != tc.want {
+				t.Fatalf("reasoning_effort = %q, want %q: %s", got, tc.want, mustJSON(out))
+			}
+		})
+	}
+}
