@@ -133,6 +133,13 @@ func TestGeminiChatParityChatToGeminiRequest(t *testing.T) {
 		// reasoning_content -> thought part (transformation.py:880-883).
 		{"assistant reasoning", `{"messages":[{"role":"user","content":"q"},{"role":"assistant","content":"a","reasoning_content":"why"}]}`,
 			`{"contents":[{"role":"user","parts":[{"text":"q"}]},{"role":"model","parts":[{"text":"why","thought":true},{"text":"a"}]}]}`},
+		// An empty or blank reasoning summary mints no part — the same
+		// truthiness gate the reference applies, and the empty thought part
+		// it would produce is a 400 on strict upstreams.
+		{"assistant empty reasoning", `{"messages":[{"role":"user","content":"q"},{"role":"assistant","content":"a","reasoning_content":""}]}`,
+			`{"contents":[{"role":"user","parts":[{"text":"q"}]},{"role":"model","parts":[{"text":"a"}]}]}`},
+		{"assistant blank reasoning", `{"messages":[{"role":"user","content":"q"},{"role":"assistant","content":"a","reasoning_content":"  "}]}`,
+			`{"contents":[{"role":"user","parts":[{"text":"q"}]},{"role":"model","parts":[{"text":"a"}]}]}`},
 		// Signed thinking block -> a thought part carrying the signature
 		// itself (deliberate deviation from transformation.py:884-901, whose
 		// plain-text signature carrier loses the signature on the way back —

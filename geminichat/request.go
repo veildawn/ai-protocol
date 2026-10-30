@@ -563,8 +563,12 @@ func splitDataURL(url string) (media, data string, err error) {
 // text, generated images, and the calls. carriesCalls reports whether the turn
 // actually names a call — the tool results that follow pair against it.
 func assistantMessageParts(m map[string]any) (parts []any, carriesCalls bool, err error) {
-	if rc, ok := m["reasoning_content"]; ok && rc != nil {
-		parts = append(parts, map[string]any{"thought": true, "text": jsonx.String(rc)})
+	// reasoning_content -> thought part, gated on text the way the reference's
+	// truthiness check is (transformation.py:880): an empty or blank summary
+	// mints no part — it says nothing, and the zero-length thought part is an
+	// INVALID_ARGUMENT on strict gemini upstreams (measured on cloudcode-pa).
+	if s := jsonx.GetString(m, "reasoning_content"); strings.TrimSpace(s) != "" {
+		parts = append(parts, map[string]any{"thought": true, "text": s})
 	}
 	if raw, ok := m["thinking_blocks"]; ok && raw != nil {
 		if tbs, isList := jsonx.AsSlice(raw); isList {

@@ -6,6 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Gemini/Chat fold: an empty `reasoning_content` no longer mints a
+  zero-length thought part. The chat->gemini fold gated the summary on
+  presence alone, so a client that states the field unconditionally —
+  DeepSeek-style clients emit `""` on assistant turns that carried no
+  reasoning — handed the target `{"thought":true,"text":""}`, a part shape
+  strict gemini upstreams refuse outright. Measured live on cloudcode-pa:
+  the identical chat request answers 400 with the empty field present and
+  200 with it omitted. The fold now applies the reference's truthiness gate
+  (empty and whitespace-only both drop), matching the check this codec's own
+  response and stream directions already ran.
+
 ## [0.9.3] - 2026-10-29
 
 ### Fixed
