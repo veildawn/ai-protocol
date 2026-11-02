@@ -1,10 +1,10 @@
 package geminichat
 
 import (
-	"encoding/base64"
 	"fmt"
 	"strings"
 
+	"github.com/veildawn/ai-protocol/internal/base64x"
 	"github.com/veildawn/ai-protocol/internal/jsonx"
 )
 
@@ -398,11 +398,8 @@ func isBase64DataURL(s string) bool {
 	if !found {
 		return false
 	}
-	decoded, err := base64.StdEncoding.Strict().DecodeString(payload)
-	if err != nil {
-		return false
-	}
-	return base64.StdEncoding.EncodeToString(decoded) == payload
+	_, ok := base64x.ValidateStrict(payload)
+	return ok
 }
 
 // geminiUsageToChat folds usageMetadata onto the chat usage shape.

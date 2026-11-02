@@ -1,12 +1,12 @@
 package geminiresponses
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"reflect"
 	"strings"
 
+	"github.com/veildawn/ai-protocol/internal/base64x"
 	"github.com/veildawn/ai-protocol/internal/cerr"
 	"github.com/veildawn/ai-protocol/internal/jsonx"
 	"github.com/veildawn/ai-protocol/internal/schemanorm"
@@ -971,27 +971,8 @@ func splitDataURL(url string) (mime string, data string, ok bool) {
 // \r\n rather than reject them, so a file's trailing lines after a real
 // payload would otherwise still "decode" into a request the upstream refuses.
 func looksBase64(s string) bool {
-	if s == "" {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9',
-			c == '+', c == '/', c == '=', c == '-', c == '_':
-		default:
-			return false
-		}
-	}
-	for _, enc := range []*base64.Encoding{
-		base64.StdEncoding, base64.RawStdEncoding,
-		base64.URLEncoding, base64.RawURLEncoding,
-	} {
-		if _, err := enc.DecodeString(s); err == nil {
-			return true
-		}
-	}
-	return false
+	_, ok := base64x.ValidatePermissive(s)
+	return ok
 }
 
 // urlMimeTable maps a file extension onto the wire's accepted media types.

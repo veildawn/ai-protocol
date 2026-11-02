@@ -7,7 +7,6 @@ package geminimessages
 
 import (
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"reflect"
@@ -15,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/veildawn/ai-protocol/internal/base64x"
 	"github.com/veildawn/ai-protocol/internal/jsonx"
 )
 
@@ -97,11 +97,11 @@ func parseDataURL(url string) (media, data string, ok bool) {
 // looksBase64 reports whether s is a well-formed base64 payload, the check the
 // reference runs before treating a data URL as media rather than text.
 func looksBase64(s string) bool {
-	if s == "" || len(s)%4 != 0 {
+	if s == "" {
 		return false
 	}
-	_, err := base64.StdEncoding.DecodeString(s)
-	return err == nil
+	_, ok := base64x.ValidateString(s)
+	return ok
 }
 
 // isAudioDataURL reports whether a text part's content is exactly a base64
