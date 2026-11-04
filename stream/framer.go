@@ -72,11 +72,17 @@ func (f *Framer) Feed(p []byte, fn func(Event) error) error {
 	return nil
 }
 
-// takeLine appends content to the pending line and processes the result as one
-// complete line.
+// takeLine processes content as one complete line. When f.line is empty
+// (the common case where a complete line was received in a single chunk),
+// content is processed directly to eliminate intermediate append allocations.
 func (f *Framer) takeLine(content []byte, fn func(Event) error) error {
 	if len(f.line)+len(content) > maxEventBytes {
 		return fmt.Errorf("SSE line exceeds %d bytes", maxEventBytes)
+	}
+	// Fast path: if there is no pending line prefix from a prior chunk,
+	// process content directly without copying into f.line.
+	if len(f.line) == 0 {
+		return f.processLine(content, fn)
 	}
 	f.line = append(f.line, content...)
 	err := f.processLine(f.line, fn)
