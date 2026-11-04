@@ -18,6 +18,9 @@ type Framer struct {
 	crPending bool
 	event     string
 	data      []string
+	// dataBytes tracks total accumulated data payload size for the current
+	// event to prevent unbounded memory allocation across multi-line events (DoS).
+	dataBytes int
 }
 
 // Feed adds a chunk and calls fn for each complete event in it. The partial
@@ -115,12 +118,18 @@ func (f *Framer) processLine(line []byte, fn func(Event) error) error {
 	case "event":
 		f.event = string(value)
 	case "data":
+		// Enforce maxEventBytes across multi-line data payloads to prevent unbounded memory growth.
+		if f.dataBytes+len(value) > maxEventBytes {
+			return fmt.Errorf("SSE event data exceeds %d bytes", maxEventBytes)
+		}
+		f.dataBytes += len(value)
 		f.data = append(f.data, string(value))
 	}
 	return nil
 }
 
 func (f *Framer) flush(fn func(Event) error) error {
+	f.dataBytes = 0
 	if f.event == "" && len(f.data) == 0 {
 		return nil
 	}

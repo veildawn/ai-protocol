@@ -90,3 +90,17 @@ func TestFramerRejectsOversizedLines(t *testing.T) {
 		t.Fatal("Feed accepted a line over the existing scanner limit")
 	}
 }
+
+func TestFramerRejectsOversizedMultiLineEvent(t *testing.T) {
+	var framer Framer
+	half := strings.Repeat("a", (maxEventBytes/2)+1)
+	// First line fits within maxEventBytes
+	if err := framer.Feed([]byte("data: "+half+"\n"), func(Event) error { return nil }); err != nil {
+		t.Fatalf("first line failed: %v", err)
+	}
+	// Second line by itself fits within line limit, but aggregate exceeds maxEventBytes
+	err := framer.Feed([]byte("data: "+half+"\n\n"), func(Event) error { return nil })
+	if err == nil {
+		t.Fatal("Feed accepted multi-line data payload exceeding maxEventBytes")
+	}
+}
