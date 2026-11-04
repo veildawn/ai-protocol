@@ -94,13 +94,85 @@ func TestFramerRejectsOversizedLines(t *testing.T) {
 func TestFramerRejectsOversizedMultiLineEvent(t *testing.T) {
 	var framer Framer
 	half := strings.Repeat("a", (maxEventBytes/2)+1)
-	// First line fits within maxEventBytes
 	if err := framer.Feed([]byte("data: "+half+"\n"), func(Event) error { return nil }); err != nil {
-		t.Fatalf("first line failed: %v", err)
+		t.Fatalf("first line: %v", err)
 	}
-	// Second line by itself fits within line limit, but aggregate exceeds maxEventBytes
 	err := framer.Feed([]byte("data: "+half+"\n\n"), func(Event) error { return nil })
 	if err == nil {
-		t.Fatal("Feed accepted multi-line data payload exceeding maxEventBytes")
+		t.Fatal("Feed accepted multi-line data over the event ceiling")
+	}
+}
+
+func TestFramerCountsJoinNewlinesTowardTheEventCeiling(t *testing.T) {
+	// Leave room for the "data: " prefix so each line stays within the line
+	// cap, and land the joined payload on the event ceiling. One more value
+	// byte must fail: the newline between the fields is part of the payload,
+	// so a counter that only added len(value) would still accept it.
+	const lead = "abcdef"
+	restN := maxEventBytes - len(lead) - 1
+	rest := strings.Repeat("c", restN)
+	var got Event
+	var framer Framer
+	if err := framer.Feed([]byte("data: "+lead+"\ndata: "+rest+"\n\n"), func(ev Event) error {
+		got = ev
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Data) != maxEventBytes || got.Data != lead+"\n"+rest {
+		t.Fatalf("joined length = %d, want %d", len(got.Data), maxEventBytes)
+	}
+
+	over := strings.Repeat("c", restN+1)
+	var overFramer Framer
+	if err := overFramer.Feed([]byte("data: "+lead+"\ndata: "+over+"\n\n"), func(Event) error { return nil }); err == nil {
+		t.Fatal("Feed accepted joined data one byte over the ceiling")
+	}
+}
+
+func TestFramerDispatchesEmptyDataFields(t *testing.T) {
+	var framer Framer
+	var got []Event
+	if err := framer.Feed([]byte("data:\n\ndata:\ndata:\n\n"), func(ev Event) error {
+		got = append(got, ev)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Data != "" || got[1].Data != "\n" {
+		t.Fatalf("events = %#v, want one empty field and two empty fields joined as a newline", got)
+	}
+}
+
+func TestFramerEmptyDataFieldsCountTowardTheCeiling(t *testing.T) {
+	// One legal line fills the event to just under the ceiling. Each empty
+	// field after it adds the newline the payload will contain. A counter
+	// that ignores empty values would keep accepting them.
+	const prefix = "data: "
+	value := strings.Repeat("a", maxEventBytes-len(prefix))
+	var b strings.Builder
+	b.WriteString(prefix)
+	b.WriteString(value)
+	b.WriteByte('\n')
+	for i := 0; i < len(prefix); i++ {
+		b.WriteString("data:\n")
+	}
+	body := b.String()
+
+	var got Event
+	var framer Framer
+	if err := framer.Feed([]byte(body+"\n"), func(ev Event) error {
+		got = ev
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Data) != maxEventBytes || !strings.HasPrefix(got.Data, value) || !strings.HasSuffix(got.Data, strings.Repeat("\n", len(prefix))) {
+		t.Fatalf("empty fields did not fill the ceiling: length %d", len(got.Data))
+	}
+
+	var over Framer
+	if err := over.Feed([]byte(body+"data:\n"), func(Event) error { return nil }); err == nil {
+		t.Fatal("Feed accepted empty data fields past the event ceiling")
 	}
 }

@@ -1,4 +1,6 @@
-// Package base64x provides zero-allocation base64 utilities and validation.
+// Package base64x checks and encodes base64 without allocating. The folds use
+// the checks before treating a data URL as media, and EncodeDataURL builds a
+// data URL in one allocation.
 package base64x
 
 import (
