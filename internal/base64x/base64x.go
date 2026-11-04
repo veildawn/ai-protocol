@@ -1,3 +1,4 @@
+// Package base64x provides zero-allocation base64 utilities and validation.
 package base64x
 
 import (
@@ -84,7 +85,7 @@ func ValidateString(s string) (decodedLen int, ok bool) {
 		}
 	}
 
-	return (n / 4) * 3 - pad, true
+	return (n/4)*3 - pad, true
 }
 
 // ValidateStrict checks whether s is a valid canonical standard base64 string,
@@ -131,7 +132,7 @@ func ValidateStrict(s string) (decodedLen int, ok bool) {
 		}
 	}
 
-	return (n / 4) * 3 - pad, true
+	return (n/4)*3 - pad, true
 }
 
 // ValidatePermissive checks whether s is a valid base64 payload under either
