@@ -1,3 +1,6 @@
+// Package base64x checks and encodes base64 without allocating. The folds use
+// the checks before treating a data URL as media, and EncodeDataURL builds a
+// data URL in one allocation.
 package base64x
 
 import (
@@ -84,7 +87,7 @@ func ValidateString(s string) (decodedLen int, ok bool) {
 		}
 	}
 
-	return (n / 4) * 3 - pad, true
+	return (n/4)*3 - pad, true
 }
 
 // ValidateStrict checks whether s is a valid canonical standard base64 string,
@@ -131,7 +134,7 @@ func ValidateStrict(s string) (decodedLen int, ok bool) {
 		}
 	}
 
-	return (n / 4) * 3 - pad, true
+	return (n/4)*3 - pad, true
 }
 
 // ValidatePermissive checks whether s is a valid base64 payload under either
