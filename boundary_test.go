@@ -287,11 +287,11 @@ var boundarySurfaceAllowlist = map[string][]string{
 		"GeminiResponseToResponses", "GeminiToResponses", "PipeGeminiToResponses", "PipeResponsesToGemini",
 		"ResponsesResponseToGemini", "ResponsesToGemini", "StreamOpts",
 	},
-		"imagesgemini": {
-			"GeminiResponseToImages", "GeminiToImages", "ImagesResponseToGemini", "ImagesToGemini",
-		},
-		"internal/base64x":     {"EncodeDataURL", "ValidatePermissive", "ValidateStrict", "ValidateString"},
-		"internal/cerr":        {"UnsupportedParam", "UnsupportedParam.Error"},
+	"imagesgemini": {
+		"GeminiResponseToImages", "GeminiToImages", "ImagesResponseToGemini", "ImagesToGemini",
+	},
+	"internal/base64x": {"EncodeDataURL", "ValidatePermissive", "ValidateStrict", "ValidateString"},
+	"internal/cerr":    {"UnsupportedParam", "UnsupportedParam.Error"},
 	"internal/dialectvocab": {
 		"AnthropicHostedTools", "DefaultMaxTokens", "IsAnthropicHostedTool",
 		"IsResponsesOnlyTool", "ResponsesOnlyTools", "ThinkingBudget",
