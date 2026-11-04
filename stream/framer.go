@@ -3,7 +3,6 @@ package stream
 import (
 	"bytes"
 	"fmt"
-	"strings"
 )
 
 // Framer incrementally decodes SSE events. Data received by Feed is not
@@ -17,12 +16,20 @@ type Framer struct {
 	// out to be the first half of a CRLF ending split across chunks.
 	crPending bool
 	event     string
-	data      []string
+	// data is the payload flush will hand out. Fields are joined with '\n' as
+	// they arrive, so len(data) is the size of that payload and one event
+	// cannot grow past maxEventBytes.
+	data []byte
+	// sawData records that this event had a data field, including an empty
+	// one. The buffer alone cannot tell that from an event with no data
+	// field, and "data:\n\n" must still dispatch.
+	sawData bool
 }
 
 // Feed adds a chunk and calls fn for each complete event in it. The partial
 // line and event are retained for the next call. The scanner's existing
-// per-line limit is enforced before appending more bytes.
+// per-line limit is enforced before appending more bytes, and the joined data
+// of one event is held to that same ceiling.
 func (f *Framer) Feed(p []byte, fn func(Event) error) error {
 	for len(p) > 0 {
 		if f.crPending {
@@ -115,17 +122,34 @@ func (f *Framer) processLine(line []byte, fn func(Event) error) error {
 	case "event":
 		f.event = string(value)
 	case "data":
-		f.data = append(f.data, string(value))
+		// The newline between fields counts. An empty field would otherwise
+		// add nothing to a value-only total while the joined payload grew
+		// without a delimiter.
+		extra := len(value)
+		if f.sawData {
+			extra++
+		}
+		if len(f.data)+extra > maxEventBytes {
+			return fmt.Errorf("SSE event data exceeds %d bytes", maxEventBytes)
+		}
+		if f.sawData {
+			f.data = append(f.data, '\n')
+		}
+		f.data = append(f.data, value...)
+		f.sawData = true
 	}
 	return nil
 }
 
 func (f *Framer) flush(fn func(Event) error) error {
-	if f.event == "" && len(f.data) == 0 {
+	data := string(f.data)
+	sawData := f.sawData
+	f.data = f.data[:0]
+	f.sawData = false
+	if f.event == "" && !sawData {
 		return nil
 	}
-	ev := Event{Event: f.event, Data: strings.Join(f.data, "\n")}
+	ev := Event{Event: f.event, Data: data}
 	f.event = ""
-	f.data = f.data[:0]
 	return fn(ev)
 }
