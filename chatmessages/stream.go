@@ -93,19 +93,65 @@ func PipeMessagesToChat(dst io.Writer, src io.Reader, opts StreamOpts) (int64, e
 }
 
 type chatToMsgState struct {
-	started    bool
-	blockOpen  bool
-	blockType  string // text, tool_use, thinking
-	blockIndex int
-	id         string
-	model      string
-	toolIndex  map[int]int // openai tool index -> anthropic block index
-	closed     bool
+	started     bool
+	blockOpen   bool
+	blockType   string // text, tool_use, thinking
+	blockIndex  int
+	id          string
+	model       string
+	toolIndex   map[int]int    // openai tool index -> anthropic block index
+	toolByID    map[string]int // call id -> openai tool index the wire gave it
+	nextUnnamed int            // openai tool index for a delta that names none
+	closed      bool
 	// pendingStop holds a finish_reason seen on a chunk that carried no usage.
 	// Under stream_options.include_usage the usage arrives in a later
 	// choices-less chunk, so the terminal frames wait for it rather than
 	// reporting zero tokens.
 	pendingStop string
+}
+
+// toolSlot maps a delta's call onto the openai tool index the block map is
+// keyed by. The call's id is what identifies it: a delta naming an id that
+// already owns a slot continues that slot, and one naming a new id opens a
+// new slot. The wire index is honoured only while it is free — several relays
+// reuse 0 for every call, and keying on the index alone folded two parallel
+// calls into one tool_use.
+func (s *chatToMsgState) toolSlot(callID string, statedIdx int, stated bool) int {
+	if s.toolByID == nil {
+		s.toolByID = map[string]int{}
+	}
+	if callID != "" {
+		if idx, open := s.toolByID[callID]; open {
+			return idx
+		}
+		idx := s.nextUnnamed
+		if stated && !s.indexOwned(statedIdx) {
+			idx = statedIdx
+		}
+		s.toolByID[callID] = idx
+		if idx >= s.nextUnnamed {
+			s.nextUnnamed = idx + 1
+		}
+		return idx
+	}
+	idx := statedIdx
+	if !stated || s.indexOwned(idx) {
+		idx = s.nextUnnamed
+	}
+	if idx >= s.nextUnnamed {
+		s.nextUnnamed = idx + 1
+	}
+	return idx
+}
+
+// indexOwned reports whether a call id already holds the wire index.
+func (s *chatToMsgState) indexOwned(idx int) bool {
+	for _, held := range s.toolByID {
+		if held == idx {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *chatToMsgState) feedChatChunk(obj map[string]any) []stream.Event {
@@ -238,7 +284,15 @@ func (s *chatToMsgState) feedChatChunk(obj map[string]any) []stream.Event {
 			if !ok {
 				continue
 			}
-			idx, _ := jsonx.Int(tm["index"])
+			callID := jsonx.GetString(tm, "id")
+			statedIdx, stated := jsonx.Int(tm["index"])
+			// The index is optional on the wire and several relays reuse 0
+			// for every call. What identifies a call is its id: a delta
+			// naming an id that already owns a slot continues THAT slot, and
+			// a delta naming a new id opens a new one. Keying on the index
+			// alone folded two parallel calls into one tool_use and appended
+			// the second call's arguments to the first block.
+			idx := s.toolSlot(callID, statedIdx, stated)
 			if s.toolIndex == nil {
 				s.toolIndex = map[int]int{}
 			}

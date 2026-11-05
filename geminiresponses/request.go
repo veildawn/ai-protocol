@@ -917,7 +917,13 @@ func mediaPart(url string) (map[string]any, error) {
 	if mime := mimeFromExtension(url); mime != "" && strings.Contains(url, "https://") {
 		return map[string]any{"file_data": map[string]any{"mime_type": mime, "file_uri": url}}, nil
 	}
-	if strings.Contains(url, "http://") || strings.Contains(url, "https://") || strings.Contains(url, "base64") {
+	// A data URL is decided by its scheme, never by a substring: a payload may
+	// spell the marker as ";B64," or carry parameters after it, and the
+	// splitter takes the case-insensitive ";base64," it is given. Routing the
+	// data: scheme through the same contains-"base64" gate as an http
+	// reference sent every such variant to the "is not a data URL" branch —
+	// the media was dropped and the tool result was left holding a string.
+	if isDataURL(url) || strings.Contains(url, "http://") || strings.Contains(url, "https://") {
 		mime, data, ok := splitDataURL(url)
 		if !ok {
 			return nil, fmt.Errorf("media reference %q is not a data URL and cannot be read offline", url)
@@ -925,6 +931,12 @@ func mediaPart(url string) (map[string]any, error) {
 		return map[string]any{"inline_data": map[string]any{"data": data, "mime_type": mime}}, nil
 	}
 	return nil, fmt.Errorf("unable to determine the media type for %q", url)
+}
+
+// isDataURL reports whether raw opens a data URL: the scheme at the start of
+// the string, in any letter case.
+func isDataURL(raw string) bool {
+	return len(raw) >= 5 && strings.EqualFold(raw[:5], "data:")
 }
 
 // splitDataURL parses `data:<mime>;base64,<bytes>`; the mime keeps any
@@ -949,11 +961,11 @@ func mediaPart(url string) (map[string]any, error) {
 // A payload that fails it is not media: the value stays text, which is a
 // turn that works.
 func splitDataURL(url string) (mime string, data string, ok bool) {
-	if len(url) < 5 || !strings.EqualFold(url[:5], "data:") {
+	if !isDataURL(url) {
 		return "", "", false
 	}
 	rest := url[5:]
-	j := strings.Index(rest, ";base64,")
+	j := indexBase64Marker(rest)
 	if j < 0 {
 		return "", "", false
 	}
@@ -962,6 +974,24 @@ func splitDataURL(url string) (mime string, data string, ok bool) {
 		return "", "", false
 	}
 	return strings.ReplaceAll(rest[:j], `\/`, `/`), data, true
+}
+
+// indexBase64Marker finds the ";base64," that separates a data URL's media
+// type from its payload, ignoring the marker's case. RFC 2397 spells it
+// lowercase; clients hand it over upper-cased often enough that the media
+// gate has to read both, or an image a caller sent as ";B64," silently turns
+// into a text reference the wire cannot carry.
+func indexBase64Marker(rest string) int {
+	const marker = ";base64,"
+	if j := strings.Index(rest, marker); j >= 0 {
+		return j
+	}
+	for i := 0; i+len(marker) <= len(rest); i++ {
+		if strings.EqualFold(rest[i:i+len(marker)], marker) {
+			return i
+		}
+	}
+	return -1
 }
 
 // looksBase64 reports whether s is a payload the upstream's base64 reader

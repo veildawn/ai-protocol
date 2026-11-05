@@ -44,6 +44,51 @@ func chatMsgParityEvents(t *testing.T, out string) []map[string]any {
 // litellm's chat dialects stream. The fold must open a thinking block carrying
 // the chunk's text and signature and emit the signature as a signature_delta,
 // not drop the block wholesale (litellm: adapters/transformation.py:1533-1599).
+// A chat stream may omit tool_calls[].index — or repeat index 0 — on a relay
+// that forwards each call as it is announced. Every delta then belongs to the
+// call its id names, not to call 0: folding them into one tool_use lost the
+// second parallel call entirely.
+func TestChatToMessagesStreamKeepsIndexlessParallelCalls(t *testing.T) {
+	for name, deltas := range map[string][]string{
+		"no-index": {
+			`{"tool_calls":[{"id":"c_a","type":"function","function":{"name":"a","arguments":"{\"x\":1}"}}]}`,
+			`{"tool_calls":[{"id":"c_b","type":"function","function":{"name":"b","arguments":"{\"y\":2}"}}]}`,
+		},
+		"shared-index": {
+			`{"tool_calls":[{"index":0,"id":"c_a","type":"function","function":{"name":"a","arguments":"{\"x\":1}"}}]}`,
+			`{"tool_calls":[{"index":0,"id":"c_b","type":"function","function":{"name":"b","arguments":"{\"y\":2}"}}]}`,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			lines := []string{
+				`data: {"id":"c1","model":"m","choices":[{"delta":{"role":"assistant","tool_calls":[{"id":"c_a","type":"function","function":{"name":"a","arguments":""}}]}}]}`,
+				``,
+			}
+			_ = lines
+			var b strings.Builder
+			for _, d := range deltas {
+				b.WriteString(`data: {"id":"c1","choices":[{"delta":` + d + `}]}` + "\n\n")
+			}
+			b.WriteString(`data: {"id":"c1","choices":[{"delta":{},"finish_reason":"tool_calls"}]}` + "\n\n")
+			var dst bytes.Buffer
+			if _, err := PipeStream(Chat, Messages, &dst, strings.NewReader(b.String()), StreamOpts{Model: "m"}); err != nil {
+				t.Fatal(err)
+			}
+			var names []string
+			for _, ev := range chatMsgParityEvents(t, dst.String()) {
+				if ev["type"] == "content_block_start" {
+					if blk, ok := ev["content_block"].(map[string]any); ok && blk["type"] == "tool_use" {
+						names = append(names, blk["name"].(string))
+					}
+				}
+			}
+			if len(names) != 2 || names[0] != "a" || names[1] != "b" {
+				t.Fatalf("tool_use blocks = %v, want [a b]: %s", names, dst.String())
+			}
+		})
+	}
+}
+
 func TestChatToMessagesStreamFoldsThinkingBlocks(t *testing.T) {
 	src := strings.Join([]string{
 		`data: {"id":"c1","model":"m","choices":[{"delta":{"thinking_blocks":[{"type":"thinking","thinking":"why","signature":"SIG"}]}}]}`,

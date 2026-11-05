@@ -1513,6 +1513,17 @@ func serviceTierToWire(v string) string {
 	}
 }
 
+// firstNonNil returns the first value that is not nil, the way a fold reads a
+// field the wire may spell two ways.
+func firstNonNil(vs ...any) any {
+	for _, v := range vs {
+		if v != nil {
+			return v
+		}
+	}
+	return nil
+}
+
 // GeminiToChat folds a generateContent request body into a chat request body.
 // The source names no model and no stream flag (both ride the URL, not the
 // payload), so the fold carries neither. Fields the chat wire has no spelling
@@ -1521,7 +1532,12 @@ func serviceTierToWire(v string) string {
 func GeminiToChat(body map[string]any) (map[string]any, error) {
 	out := map[string]any{}
 	var msgs []any
-	if sys, ok := jsonx.AsMap(body["system_instruction"]); ok {
+	// The wire spells its fields in camelCase (systemInstruction,
+	// functionDeclarations); a dict produced by a normalized encoder spells
+	// them snake_case. Both spellings name the same field, so both are read —
+	// accepting only the snake_case one silently dropped a real Gemini
+	// client's system prompt and every tool declaration it sent.
+	if sys, ok := jsonx.AsMap(firstNonNil(body["system_instruction"], body["systemInstruction"])); ok {
 		if parts, ok := jsonx.AsSlice(sys["parts"]); ok {
 			for _, p := range parts {
 				pm, ok := jsonx.AsMap(p)
@@ -1540,7 +1556,7 @@ func GeminiToChat(body map[string]any) (map[string]any, error) {
 		msgs = []any{}
 	}
 	out["messages"] = msgs
-	gc, _ := jsonx.AsMap(body["generationConfig"])
+	gc, _ := jsonx.AsMap(firstNonNil(body["generationConfig"], body["generation_config"]))
 	for _, k := range []string{"temperature", "top_p", "top_k", "presence_penalty", "frequency_penalty", "seed"} {
 		if v, ok := gc[k]; ok && v != nil {
 			out[k] = v
@@ -1594,7 +1610,7 @@ func GeminiToChat(body map[string]any) (map[string]any, error) {
 			if !ok {
 				continue
 			}
-			if decls, ok := jsonx.AsSlice(tm["function_declarations"]); ok {
+			if decls, ok := jsonx.AsSlice(firstNonNil(tm["function_declarations"], tm["functionDeclarations"])); ok {
 				// The gemini wire spells its type enums in SCREAMING_SNAKE; the
 				// chat wire validates the lowercase JSON Schema vocabulary and
 				// refuses the uppercase spelling, so the relayed schema is
@@ -1627,7 +1643,7 @@ func GeminiToChat(body map[string]any) (map[string]any, error) {
 	if hadSearch {
 		out["web_search_options"] = map[string]any{}
 	}
-	if tcfg, ok := jsonx.AsMap(body["toolConfig"]); ok {
+	if tcfg, ok := jsonx.AsMap(firstNonNil(body["toolConfig"], body["tool_config"])); ok {
 		if fcc, ok := jsonx.AsMap(tcfg["functionCallingConfig"]); ok {
 			var nonEmpty []string
 			if names, ok := jsonx.AsSlice(fcc["allowed_function_names"]); ok {
@@ -1675,12 +1691,25 @@ func thinkingConfigToEffort(tc map[string]any) (string, bool) {
 	return thinkingcfg.Effort(tc)
 }
 
+// firstNonEmptyKey returns the first of the two keys that carries a string.
+func firstNonEmptyKey(m map[string]any, a, b string) string {
+	if v := jsonx.GetString(m, a); v != "" {
+		return a
+	}
+	if v := jsonx.GetString(m, b); v != "" {
+		return b
+	}
+	return a
+}
+
 // wireResponseFormat reads the structured-output config back into a chat
 // response_format. A json mime with no schema can only have come from a bare
 // json_object request, so it folds back to that; a schema crosses through
 // ResponseSchemaOf, enum-normalized the way a declaration's parameters are.
 func wireResponseFormat(gc map[string]any) map[string]any {
-	switch jsonx.GetString(gc, "response_mime_type") {
+	// The wire's camelCase spelling is the one a real client sends; the
+	// snake_case one is what the normalized form carries.
+	switch jsonx.GetString(gc, firstNonEmptyKey(gc, "response_mime_type", "responseMimeType")) {
 	case "application/json":
 		if sm, ok := schemanorm.ResponseSchemaOf(gc); ok {
 			return map[string]any{"type": "json_schema", "json_schema": map[string]any{
@@ -1705,6 +1734,10 @@ func geminiContentsToChatMessages(contents []any) []any {
 	var msgs []any
 	callSeq := 0
 	var calls []callRef
+	// answered marks the calls a result has already paired with, by index
+	// into calls, so a second result for the same function lands on the
+	// second call rather than on the first one again.
+	var answered []bool
 	for _, c := range contents {
 		cm, ok := jsonx.AsMap(c)
 		if !ok {
@@ -1733,7 +1766,7 @@ func geminiContentsToChatMessages(contents []any) []any {
 			if sig != "" {
 				sigs = append(sigs, sig)
 			}
-			if fc, ok := jsonx.AsMap(pm["function_call"]); ok {
+			if fc, ok := jsonx.AsMap(firstNonNil(pm["function_call"], pm["functionCall"])); ok {
 				id := jsonx.GetString(fc, "id")
 				if id == "" {
 					id = fmt.Sprintf("call_%d", callSeq)
@@ -1759,17 +1792,29 @@ func geminiContentsToChatMessages(contents []any) []any {
 				// The result that answers this call pairs against the id the
 				// chat wire carries, signature suffix included.
 				calls = append(calls, callRef{name: jsonx.GetString(fc, "name"), id: jsonx.GetString(call, "id")})
+				answered = append(answered, false)
 				continue
 			}
-			if fr, ok := jsonx.AsMap(pm["function_response"]); ok {
+			if fr, ok := jsonx.AsMap(firstNonNil(pm["function_response"], pm["functionResponse"])); ok {
 				id := jsonx.GetString(fr, "id")
 				if id == "" {
+					// The wire names a result by function NAME, not by id, so
+					// two parallel calls to the same function are told apart
+					// only by the order their results come back in. Pairing
+					// the last matching call instead of the first unanswered
+					// one attached every result to the final call: the first
+					// call was left with no answer at all, and an upstream
+					// that checks is handed a history it refuses.
 					name := jsonx.GetString(fr, "name")
-					for i := len(calls) - 1; i >= 0; i-- {
-						if calls[i].name == name {
-							id = calls[i].id
-							break
-						}
+					if i := firstUnansweredCall(calls, answered, name); i >= 0 {
+						id = calls[i].id
+						answered[i] = true
+					} else if i := firstCallOfName(calls, name); i >= 0 {
+						// Every call of that name is answered already (the
+						// same history replayed twice, or a result naming a
+						// call this fold minted nothing for): the exchange
+						// being replayed is the latest one, as before.
+						id = calls[i].id
 					}
 				}
 				// A response that names an id the client was handed must pair
@@ -1787,7 +1832,7 @@ func geminiContentsToChatMessages(contents []any) []any {
 				})
 				continue
 			}
-			if inline, ok := jsonx.AsMap(pm["inline_data"]); ok {
+			if inline, ok := jsonx.AsMap(firstNonNil(pm["inline_data"], pm["inlineData"])); ok {
 				mime := firstNonEmpty(jsonx.GetString(inline, "mime_type"), jsonx.GetString(inline, "mimeType"))
 				url := "data:" + mime + ";base64," + jsonx.GetString(inline, "data")
 				if isModel {
@@ -1797,7 +1842,7 @@ func geminiContentsToChatMessages(contents []any) []any {
 				}
 				continue
 			}
-			if fd, ok := jsonx.AsMap(pm["file_data"]); ok {
+			if fd, ok := jsonx.AsMap(firstNonNil(pm["file_data"], pm["fileData"])); ok {
 				url := jsonx.GetString(fd, "file_uri")
 				if isModel {
 					mediaParts = append(mediaParts, url)
@@ -2023,6 +2068,29 @@ func firstNonEmpty(a, b string) string {
 // callRef remembers one folded call — the name a result pairs against and the
 // id the chat wire carries for it.
 type callRef struct{ name, id string }
+
+// firstCallOfName reports the latest call to name, the exchange a replay is
+// answering when none of its calls is still open, or -1 when the function was
+// never called.
+func firstCallOfName(calls []callRef, name string) int {
+	for i := len(calls) - 1; i >= 0; i-- {
+		if calls[i].name == name {
+			return i
+		}
+	}
+	return -1
+}
+
+// firstUnansweredCall reports the earliest call to name that no result has
+// paired with yet, or -1 when every call of that name is answered.
+func firstUnansweredCall(calls []callRef, answered []bool, name string) int {
+	for i := range calls {
+		if calls[i].name == name && !answered[i] {
+			return i
+		}
+	}
+	return -1
+}
 
 // signedCallID maps the id a functionResponse names onto the id the chat wire
 // carries for the call it answers, resolving the thought-signature suffix.

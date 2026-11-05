@@ -1273,9 +1273,10 @@ func TestChatToMessagesFoldsLegacyFunctionCall(t *testing.T) {
 }
 
 // A merged assistant run may repeat a tool_call id — history recorded twice —
-// and the target requires tool_use ids to be unique within the message, so
-// only the first of each id survives.
-func TestChatToMessagesDedupesRepeatedToolUseIDs(t *testing.T) {
+// and the target requires tool_use ids to be unique within the message. Both
+// calls survive under distinct ids: collapsing them deleted a call the caller
+// had made, arguments and all.
+func TestChatToMessagesDistinguishesRepeatedToolUseIDs(t *testing.T) {
 	body := `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":"hi"},` +
 		`{"role":"assistant","content":null,"tool_calls":[{"id":"call_dup_1","type":"function","function":{"name":"fn","arguments":"{}"}}]},` +
 		`{"role":"assistant","content":null,"tool_calls":[{"id":"call_dup_1","type":"function","function":{"name":"fn","arguments":"{}"}}]}],` +
@@ -1291,14 +1292,76 @@ func TestChatToMessagesDedupesRepeatedToolUseIDs(t *testing.T) {
 	}
 	msgs := m["messages"].([]any)
 	blocks := msgs[1].(map[string]any)["content"].([]any)
-	uses := 0
+	var ids []string
 	for _, b := range blocks {
 		if bm, ok := b.(map[string]any); ok && bm["type"] == "tool_use" {
-			uses++
+			ids = append(ids, bm["id"].(string))
 		}
 	}
-	if uses != 1 {
-		t.Fatalf("tool_use blocks = %d, want the duplicate collapsed: %s", uses, out.Body)
+	if len(ids) != 2 {
+		t.Fatalf("tool_use blocks = %d, want both calls kept: %s", len(ids), out.Body)
+	}
+	if ids[0] == ids[1] {
+		t.Fatalf("tool_use ids = %v, want distinct ids for distinct calls: %s", ids, out.Body)
+	}
+	if ids[0] != "call_dup_1" {
+		t.Fatalf("first tool_use id = %q, want the source id: %s", ids[0], out.Body)
+	}
+}
+
+// contentBlocks returns the block list of one folded Messages message.
+func contentBlocks(msg any) []any {
+	m, ok := msg.(map[string]any)
+	if !ok {
+		return nil
+	}
+	blocks, _ := m["content"].([]any)
+	return blocks
+}
+
+// Two source ids that differ only outside the Messages id class collapse to
+// one spelling under the rewrite. Both calls and both of their answers have to
+// survive: the request names each call exactly once and each result points at
+// the call that made it.
+func TestChatToMessagesSeparatesIDsThatSanitizeAlike(t *testing.T) {
+	body := `{"model":"m","max_tokens":10,"messages":[` +
+		`{"role":"user","content":"hi"},` +
+		`{"role":"assistant","content":null,"tool_calls":[` +
+		`{"id":"call.1","type":"function","function":{"name":"a","arguments":"{\"a\":1}"}},` +
+		`{"id":"call_1","type":"function","function":{"name":"b","arguments":"{\"b\":2}"}}]},` +
+		`{"role":"tool","tool_call_id":"call.1","content":"r1"},` +
+		`{"role":"tool","tool_call_id":"call_1","content":"r2"}],` +
+		`"tools":[{"type":"function","function":{"name":"a","parameters":{"type":"object"}}},` +
+		`{"type":"function","function":{"name":"b","parameters":{"type":"object"}}}]}`
+	out, err := ConvertRequest(Chat, Messages, []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	m = map[string]any{}
+	if err := json.Unmarshal(out.Body, &m); err != nil {
+		t.Fatal(err)
+	}
+	msgs := m["messages"].([]any)
+	var useIDs []string
+	for _, b := range contentBlocks(msgs[1]) {
+		if bm, ok := b.(map[string]any); ok && bm["type"] == "tool_use" {
+			useIDs = append(useIDs, bm["id"].(string))
+		}
+	}
+	if len(useIDs) != 2 || useIDs[0] == useIDs[1] {
+		t.Fatalf("tool_use ids = %v, want two distinct calls: %s", useIDs, out.Body)
+	}
+	var resultIDs []string
+	for _, raw := range msgs {
+		for _, b := range contentBlocks(raw) {
+			if bm, ok := b.(map[string]any); ok && bm["type"] == "tool_result" {
+				resultIDs = append(resultIDs, bm["tool_use_id"].(string))
+			}
+		}
+	}
+	if len(resultIDs) != 2 || resultIDs[0] != useIDs[0] || resultIDs[1] != useIDs[1] {
+		t.Fatalf("tool_result ids = %v, want them to answer %v: %s", resultIDs, useIDs, out.Body)
 	}
 }
 

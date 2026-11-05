@@ -56,6 +56,12 @@ func sanitizeToolNameForAnthropic(name string) string {
 // with any other character — a chat caller's "call.abc" is rewritten rather
 // than passed through, both on the call and on its result. An id with no legal
 // character at all still needs one, so it is named.
+//
+// The rewrite is per id, so two ids that differ only outside the class ("call.1"
+// and "call_1") collapse into one. A request that hands both to the target is
+// refused — and a dedupe that kept only the first dropped a call outright. A
+// conversion uses toolUseIDs, which allocates the rewritten ids over the whole
+// request and keeps every pair aligned.
 func sanitizeToolUseIDForAnthropic(id string) string {
 	var b strings.Builder
 	b.Grow(len(id))
@@ -71,6 +77,136 @@ func sanitizeToolUseIDForAnthropic(id string) string {
 		return out
 	}
 	return "tool_use_id"
+}
+
+// toolUseIDs hands out the tool_use id every chat tool call and tool answer is
+// written under. An id is legal on the Messages wire only as [a-zA-Z0-9_-], so
+// a chat caller's "call.abc" is rewritten rather than passed through. The
+// rewrite is per source id, so "call.abc" and "call_abc" both become "call_abc"
+// and two different calls end up sharing one id the target refuses; the dedupe
+// that used to keep ids unique inside a message then DELETED one of the calls,
+// arguments and all.
+//
+// So the ids are planned for the whole request before anything is folded
+// (seed), and the fold only reads the plan. Planning up front is what lets an
+// answer pair with its call whichever half the fold reaches first: results are
+// written into one message while the calls above them have not been folded.
+//
+//   - Call occurrences of a source id, in request order: the first keeps the
+//     plain spelling unless a DIFFERENT source id already drew it, each later
+//     one (a history recorded twice) takes the next free "-<n>" suffix.
+//   - The nth answer naming a source id answers its nth call, the exchange
+//     being replayed. With no call to name, it takes the plain spelling.
+type toolUseIDs struct {
+	spelling map[string]string   // source id -> the plain spelling
+	owner    map[string]string   // spelling -> source id that drew it
+	planned  map[string][]string // source id -> its calls' ids, in request order
+	folded   map[string]int      // source id -> calls folded so far
+	answered map[string]int      // source id -> results folded so far
+}
+
+func newToolUseIDs() *toolUseIDs {
+	return &toolUseIDs{
+		spelling: map[string]string{},
+		owner:    map[string]string{},
+		planned:  map[string][]string{},
+		folded:   map[string]int{},
+		answered: map[string]int{},
+	}
+}
+
+// seed plans every tool call the request's assistant turns carry, in request
+// order.
+func (t *toolUseIDs) seed(msgs []any) {
+	for _, raw := range msgs {
+		m, ok := jsonx.AsMap(raw)
+		if !ok || jsonx.GetString(m, "role") != "assistant" {
+			continue
+		}
+		tcs, _ := jsonx.AsSlice(m["tool_calls"])
+		for _, tc := range tcs {
+			if tm, ok := jsonx.AsMap(tc); ok {
+				t.plan(jsonx.GetString(tm, "id"))
+			}
+		}
+	}
+}
+
+// call returns the id a tool_use block carries for a call being folded.
+func (t *toolUseIDs) call(source string) string {
+	if source == "" {
+		return ""
+	}
+	n := t.folded[source]
+	t.folded[source] = n + 1
+	return t.occurrence(source, n)
+}
+
+// result returns the id the tool_result naming source carries: the answer of
+// that source id's next unanswered call, in the order the calls were planned.
+func (t *toolUseIDs) result(source string) string {
+	if source == "" {
+		return ""
+	}
+	n := t.answered[source]
+	t.answered[source] = n + 1
+	return t.occurrence(source, n)
+}
+
+// occurrence is the planned id of occurrence n of source, drawing an unplanned
+// one when the request carried fewer calls than the fold sees.
+func (t *toolUseIDs) occurrence(source string, n int) string {
+	if ids := t.planned[source]; n < len(ids) {
+		return ids[n]
+	}
+	return t.draw(source, n)
+}
+
+// plan records one more call of source, giving it the next spelling its
+// source id is entitled to.
+func (t *toolUseIDs) plan(source string) {
+	if source == "" {
+		return
+	}
+	t.planned[source] = append(t.planned[source], "")
+	id := t.draw(source, len(t.planned[source])-1)
+	t.planned[source][len(t.planned[source])-1] = id
+	t.owner[id] = source
+}
+
+// draw computes the spelling of occurrence n of source: the plain spelling
+// for the first while no other source id holds it, and the nth free suffix
+// after it otherwise.
+func (t *toolUseIDs) draw(source string, n int) string {
+	base := t.base(source)
+	plainFree := t.owner[base] == "" || t.owner[base] == source
+	if plainFree && n == 0 {
+		return base
+	}
+	want := n
+	if plainFree {
+		want = n - 1
+	}
+	taken := 0
+	for m := 2; ; m++ {
+		candidate := base + "-" + strconv.Itoa(m)
+		if other := t.owner[candidate]; other != "" && other != source {
+			continue
+		}
+		if taken == want {
+			return candidate
+		}
+		taken++
+	}
+}
+
+func (t *toolUseIDs) base(source string) string {
+	if base, ok := t.spelling[source]; ok {
+		return base
+	}
+	base := sanitizeToolUseIDForAnthropic(source)
+	t.spelling[source] = base
+	return base
 }
 
 // The Chat dialect's request vocabulary. A parameter in this set that the
@@ -938,6 +1074,12 @@ func openaiMessagesToAnthropic(msgs []any, nameMap map[string]string) (system []
 	// so the folded tool_use and tool_result actually reference each other.
 	legacyCallIDs, legacyResultIDs := legacyFunctionIDs(msgs)
 	legacyCallIdx, legacyResultIdx := 0, 0
+	// Every tool_use id in the request is allocated by one table, as it is
+	// folded, so a call and the result answering it converge on the same
+	// legal spelling even when two source ids collide after the rewrite.
+	ids := newToolUseIDs()
+	ids.seed(msgs)
+
 	// Anthropic requires the wire to alternate user and assistant. Two
 	// consecutive turns of one role are merged into a single message with
 	// combined content, which is how the caller's intent reads anyway; left
@@ -970,7 +1112,7 @@ func openaiMessagesToAnthropic(msgs []any, nameMap map[string]string) (system []
 			flushTools()
 			system = append(system, openaiSystemToAnthropic(m)...)
 		case "tool":
-			block, err := openaiToolResultToAnthropic(m, "")
+			block, err := openaiToolResultToAnthropic(m, "", ids)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -983,7 +1125,7 @@ func openaiMessagesToAnthropic(msgs []any, nameMap map[string]string) (system []
 				fallback = legacyResultIDs[legacyResultIdx]
 			}
 			legacyResultIdx++
-			block, err := openaiToolResultToAnthropic(m, fallback)
+			block, err := openaiToolResultToAnthropic(m, fallback, ids)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -1004,7 +1146,7 @@ func openaiMessagesToAnthropic(msgs []any, nameMap map[string]string) (system []
 				}
 				legacyCallIdx++
 			}
-			msg, err := openaiAssistantToAnthropic(m, nameMap, legacyID)
+			msg, err := openaiAssistantToAnthropic(m, nameMap, legacyID, ids)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -1017,12 +1159,10 @@ func openaiMessagesToAnthropic(msgs []any, nameMap map[string]string) (system []
 					last["tool_calls"] = append(existingToolCalls(last), tcs...)
 				}
 			}
-			// A merged assistant run may repeat a tool_call id — history that
-			// was recorded twice — and the target requires tool_use ids to be
-			// unique within the message, so only the first of each survives.
-			if last, ok := lastOfRole(out, "assistant"); ok {
-				dedupeToolUseIDs(last)
-			}
+			// toolUseIDs gives each folded call its own id, so a merged
+			// assistant run never repeats one: the target requires tool_use
+			// ids to be unique within the message, and a history recorded
+			// twice keeps both calls instead of losing one to a dedupe.
 		default:
 			flushTools()
 			out = append(out, m)
@@ -1078,31 +1218,6 @@ func collectLegacyAnswerIDs(msgs []any) []string {
 		ids = append(ids, id)
 	}
 	return ids
-}
-
-// dedupeToolUseIDs keeps only the first tool_use block for each id in one
-// assistant message's merged content.
-func dedupeToolUseIDs(msg map[string]any) {
-	blocks, ok := jsonx.AsSlice(msg["content"])
-	if !ok {
-		return
-	}
-	seen := map[string]struct{}{}
-	kept := blocks[:0]
-	for _, b := range blocks {
-		bm, ok := jsonx.AsMap(b)
-		if !ok || jsonx.GetString(bm, "type") != "tool_use" {
-			kept = append(kept, b)
-			continue
-		}
-		id := jsonx.GetString(bm, "id")
-		if _, dup := seen[id]; dup {
-			continue
-		}
-		seen[id] = struct{}{}
-		kept = append(kept, b)
-	}
-	msg["content"] = kept
 }
 
 // rstripFinalAssistant trims trailing whitespace from the last assistant turn:
@@ -1433,7 +1548,7 @@ func parseDataURL(url string) (media, data string, ok bool) {
 	return media, rest[i+len(";base64,"):], true
 }
 
-func openaiAssistantToAnthropic(m map[string]any, nameMap map[string]string, legacyID string) (map[string]any, error) {
+func openaiAssistantToAnthropic(m map[string]any, nameMap map[string]string, legacyID string, ids *toolUseIDs) (map[string]any, error) {
 	var blocks []any
 	// The thinking_blocks field rides at the head of the turn only when the
 	// content list carries no thinking of its own inline: both kept, the
@@ -1534,7 +1649,7 @@ func openaiAssistantToAnthropic(m map[string]any, nameMap map[string]string, leg
 			}
 			blocks = append(blocks, map[string]any{
 				"type":  "tool_use",
-				"id":    sanitizeToolUseIDForAnthropic(jsonx.GetString(tm, "id")),
+				"id":    ids.call(jsonx.GetString(tm, "id")),
 				"name":  name,
 				"input": input,
 			})
@@ -1664,9 +1779,11 @@ func attemptJSONRepair(s string) (any, bool) {
 // openaiToolResultToAnthropic folds one tool or legacy function answer. An
 // answer that names no tool_call_id of its own carries the fallback id its
 // position was assigned, so the pair still references each other.
-func openaiToolResultToAnthropic(m map[string]any, fallbackID string) (map[string]any, error) {
-	id := sanitizeToolUseIDForAnthropic(jsonx.GetString(m, "tool_call_id"))
-	if jsonx.GetString(m, "tool_call_id") == "" && fallbackID != "" {
+func openaiToolResultToAnthropic(m map[string]any, fallbackID string, ids *toolUseIDs) (map[string]any, error) {
+	id := ""
+	if raw := jsonx.GetString(m, "tool_call_id"); raw != "" {
+		id = ids.result(raw)
+	} else if fallbackID != "" {
 		id = fallbackID
 	}
 	block := map[string]any{

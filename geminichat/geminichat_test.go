@@ -583,6 +583,125 @@ func TestGeminiToChatExactIDOutranksSignatureSuffix(t *testing.T) {
 // spelling, this body folded with no reasoning_effort at all (after) or the
 // shallowest one (before) — a request that SUCCEEDS at minimum depth is worse
 // than one that fails, because nothing reports the loss. Observed 2026-10-28.
+// The generateContent wire spells its fields in camelCase; the same body
+// spelled snake_case is what a normalized encoder produces. A fold that reads
+// only the snake_case spelling silently drops a real client's system prompt,
+// tool declarations and parts — the request then reaches the model with
+// neither instructions nor tools.
+func TestGeminiToChatReadsBothWireSpellings(t *testing.T) {
+	camel, err := jsonx.UnmarshalMap([]byte(`{
+		"systemInstruction":{"parts":[{"text":"be nice"}]},
+		"generationConfig":{"responseMimeType":"application/json"},
+		"contents":[{"role":"user","parts":[{"text":"hi"}]},
+			{"role":"model","parts":[{"functionCall":{"id":"c1","name":"f","args":{"a":1}}}]}],
+		"tools":[{"functionDeclarations":[{"name":"f","parameters":{"type":"object"}}]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snake, err := jsonx.UnmarshalMap([]byte(`{
+		"system_instruction":{"parts":[{"text":"be nice"}]},
+		"generation_config":{"response_mime_type":"application/json"},
+		"contents":[{"role":"user","parts":[{"text":"hi"}]},
+			{"role":"model","parts":[{"function_call":{"id":"c1","name":"f","args":{"a":1}}}]}],
+		"tools":[{"function_declarations":[{"name":"f","parameters":{"type":"object"}}]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	camelOut, err := GeminiToChat(camel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snakeOut, err := GeminiToChat(snake)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a, b := mustJSON(camelOut), mustJSON(snakeOut); a != b {
+		t.Fatalf("spellings folded differently:\n camel=%s\n snake=%s", a, b)
+	}
+	msgs, _ := jsonx.AsSlice(camelOut["messages"])
+	if len(msgs) < 2 {
+		t.Fatalf("messages = %d: %s", len(msgs), mustJSON(camelOut))
+	}
+	first, _ := jsonx.AsMap(msgs[0])
+	if got := jsonx.GetString(first, "role"); got != "system" {
+		t.Fatalf("first message role = %q, want system: %s", got, mustJSON(camelOut))
+	}
+}
+
+// Two parallel calls to the SAME function are told apart only by the order
+// their responses come back. Pairing the latest matching call instead of the
+// first unanswered one attached every answer to the final call: the first
+// call was left with no answer at all.
+func TestGeminiToChatPairsParallelSameNameCallsInOrder(t *testing.T) {
+	obj, err := jsonx.UnmarshalMap([]byte(`{"contents":[
+		{"role":"model","parts":[
+			{"function_call":{"name":"search","args":{"q":"a"}}},
+			{"function_call":{"name":"search","args":{"q":"b"}}}]},
+		{"role":"user","parts":[
+			{"function_response":{"name":"search","response":{"result":"A"}}},
+			{"function_response":{"name":"search","response":{"result":"B"}}}]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := GeminiToChat(obj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgs, _ := jsonx.AsSlice(out["messages"])
+	var callIDs, resultIDs []string
+	for _, raw := range msgs {
+		m, _ := jsonx.AsMap(raw)
+		if tcs, ok := jsonx.AsSlice(m["tool_calls"]); ok {
+			for _, tc := range tcs {
+				tm, _ := jsonx.AsMap(tc)
+				callIDs = append(callIDs, jsonx.GetString(tm, "id"))
+			}
+		}
+		if id := jsonx.GetString(m, "tool_call_id"); id != "" {
+			resultIDs = append(resultIDs, id)
+		}
+	}
+	if len(callIDs) != 2 || len(resultIDs) != 2 {
+		t.Fatalf("calls=%v results=%v", callIDs, resultIDs)
+	}
+	if callIDs[0] == callIDs[1] {
+		t.Fatalf("the two calls share an id: %v", callIDs)
+	}
+	if resultIDs[0] != callIDs[0] || resultIDs[1] != callIDs[1] {
+		t.Fatalf("results %v should answer calls %v in order", resultIDs, callIDs)
+	}
+}
+
+// An exact id outranks a signature suffix only for the SAME call: a result
+// naming "call_1" must not attach to "call_1-2", another call's id.
+func TestGeminiToChatPairsRepeatedNameWithSuffixedCalls(t *testing.T) {
+	obj, err := jsonx.UnmarshalMap([]byte(`{"contents":[
+		{"role":"model","parts":[
+			{"function_call":{"name":"f","args":{}}},
+			{"function_call":{"name":"f","args":{}}}]},
+		{"role":"user","parts":[
+			{"function_response":{"name":"f","response":{}}},
+			{"function_response":{"name":"f","response":{}}}]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := GeminiToChat(obj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgs, _ := jsonx.AsSlice(out["messages"])
+	var resultIDs []string
+	for _, raw := range msgs {
+		m, _ := jsonx.AsMap(raw)
+		if id := jsonx.GetString(m, "tool_call_id"); id != "" {
+			resultIDs = append(resultIDs, id)
+		}
+	}
+	if len(resultIDs) != 2 || resultIDs[0] == resultIDs[1] {
+		t.Fatalf("results = %v, want two distinct answers", resultIDs)
+	}
+}
+
 func TestGeminiToChatCarriesThinkingLevel(t *testing.T) {
 	for _, tc := range []struct{ level, want string }{
 		{"HIGH", "high"},

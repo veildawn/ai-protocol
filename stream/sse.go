@@ -91,6 +91,13 @@ func WriteEventWith(w io.Writer, e Event, flush func(), hook func(Event) (Event,
 		if err != nil {
 			return 0, Fail("event hook", err)
 		}
+		// The zero Event names no event and carries no data. Encoding it
+		// writes a bare blank line, which a client reads as an empty
+		// keep-alive at best and as a protocol break at worst, so it is
+		// written as nothing at all: the hook drops an event by returning it.
+		if next == (Event{}) {
+			return 0, nil
+		}
 		e = next
 	}
 	return WriteEvent(w, e, flush)

@@ -8,6 +8,45 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Chat/Messages fold: tool ids that collide after the Messages character-class
+  rewrite are separated instead of merged. `call.1` and `call_1` both sanitize
+  to `call_1`; the fold wrote one id for two calls, and a dedupe that kept ids
+  unique inside a message then DELETED the second call with its arguments. A
+  repeated id in one message — history recorded twice — collapsed the same
+  way. Ids are now planned for the whole request before folding (`toolUseIDs`),
+  so occurrences of one source id get distinct spellings and each result is
+  named after the occurrence it answers. `dedupeToolUseIDs` is gone: it was
+  the mechanism of the loss.
+- Chat/Messages stream: parallel tool calls that omit `tool_calls[].index`, or
+  reuse `index: 0`, no longer fold into a single `tool_use`. The fold keyed
+  every delta on the wire index, so the second call's arguments were appended
+  to the first block and the second call never appeared. Deltas are keyed by
+  call id now, and a stated index is honoured only while no other call holds
+  it.
+- Gemini/Chat fold: two parallel calls to the SAME function now pair with
+  their responses in order. The fold searched backwards for the latest
+  matching call, so every result attached to the final call and the first call
+  was left with no answer at all — a history strict upstreams refuse.
+- Gemini/Chat fold: the wire's camelCase spelling (`systemInstruction`,
+  `functionDeclarations`, `functionCall`, `functionResponse`, `inlineData`,
+  `fileData`, `generationConfig.responseMimeType`, `toolConfig`) is read
+  alongside the snake_case one. Reading only the snake_case spelling dropped a
+  real Gemini client's system prompt, tool declarations and every call part,
+  so the model received neither instructions nor tools.
+- base64: `ValidatePermissive` reads a payload under ONE alphabet, chosen by
+  the first character that tells them apart. It accepted a mix of both
+  (`AAA+BBB_`), which no decoder reads; the media gate then passed the junk
+  through as inline data and the upstream answered `400 INVALID_ARGUMENT` on
+  every replay of that turn.
+- Responses/Gemini: a data URL is recognized by its `data:` scheme instead of
+  a `"base64"` substring, and the `;base64,` marker is matched
+  case-insensitively. `data:image/png;B64,…` and
+  `data:image/png;base64;charset=…` used to fall through to the "not a data
+  URL" branch, dropping the image and leaving a string in the tool result.
+- `stream.WriteEventWith`: a hook that returns the zero `Event` writes nothing.
+  It used to encode the zero value, emitting a bare blank line — an empty
+  keep-alive at best, a protocol break at worst. Dropping an event is now
+  spelled by returning the zero value.
 - Gemini/Chat fold: an empty `reasoning_content` no longer mints a
   zero-length thought part. The chat->gemini fold gated the summary on
   presence alone, so a client that states the field unconditionally —

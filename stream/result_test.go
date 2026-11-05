@@ -1,6 +1,9 @@
 package stream
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestObserverSeparatesLogicalChatFinishFromWireTerminal(t *testing.T) {
 	var observer Observer
@@ -15,6 +18,21 @@ func TestObserverSeparatesLogicalChatFinishFromWireTerminal(t *testing.T) {
 	}
 	if !observer.Result.Terminal {
 		t.Fatal("source [DONE] was not classified as a wire terminal")
+	}
+}
+
+// A hook drops an event by returning the zero Event. Encoding that value
+// writes a bare blank line — an empty keep-alive at best, a protocol break at
+// worst — so the writer must write nothing for it.
+func TestWriteEventWithDropsZeroValue(t *testing.T) {
+	var b strings.Builder
+	n, err := WriteEventWith(&b, Event{Event: "content_block_delta", Data: `{"type":"content_block_delta"}`}, nil,
+		func(Event) (Event, error) { return Event{}, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 || b.Len() != 0 {
+		t.Fatalf("wrote %d bytes (%q), want nothing", n, b.String())
 	}
 }
 
