@@ -132,10 +132,25 @@ func TestValidatePermissive(t *testing.T) {
 		"abc===",
 		"====",
 		"",
+		// Both letter pairs at once: a payload mixing "+"/"/" with "-"/"_"
+		// belongs to neither alphabet, and admitting it put bytes on the wire
+		// that the upstream refuses on every replay.
+		"AAA+BBB_",
+		"AAA-BBB/",
+		"+/-_",
+		"-_+/",
 	}
 	for _, inv := range invalid {
 		if _, ok := ValidatePermissive(inv); ok {
 			t.Errorf("ValidatePermissive(%q) expected false, got true", inv)
+		}
+	}
+
+	// Each alphabet on its own, one of each pair, stays valid.
+	valid := []string{"AAA+", "AAA/", "AAA-BBB_", "+/+/", "-_-_", "AAA+BBB/"}
+	for _, v := range valid {
+		if _, ok := ValidatePermissive(v); !ok {
+			t.Errorf("ValidatePermissive(%q) expected true, got false", v)
 		}
 	}
 }

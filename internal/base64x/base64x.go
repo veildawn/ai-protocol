@@ -13,13 +13,11 @@ import (
 // -2: padding '='
 var stdDecodeTable [256]int8
 var urlDecodeTable [256]int8
-var anyDecodeTable [256]int8
 
 func init() {
 	for i := range stdDecodeTable {
 		stdDecodeTable[i] = -1
 		urlDecodeTable[i] = -1
-		anyDecodeTable[i] = -1
 	}
 
 	const stdAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
@@ -28,17 +26,14 @@ func init() {
 	for i := 0; i < len(stdAlphabet); i++ {
 		c := stdAlphabet[i]
 		stdDecodeTable[c] = int8(i)
-		anyDecodeTable[c] = int8(i)
 	}
 	for i := 0; i < len(urlAlphabet); i++ {
 		c := urlAlphabet[i]
 		urlDecodeTable[c] = int8(i)
-		anyDecodeTable[c] = int8(i)
 	}
 
 	stdDecodeTable['='] = -2
 	urlDecodeTable['='] = -2
-	anyDecodeTable['='] = -2
 }
 
 // EncodeDataURL constructs a base64 data URL ("data:<mime>;base64,<payload>")
@@ -140,6 +135,14 @@ func ValidateStrict(s string) (decodedLen int, ok bool) {
 // ValidatePermissive checks whether s is a valid base64 payload under either
 // standard or URL alphabets, with or without padding (Std, RawStd, URL, RawURL).
 // Zero heap allocations.
+//
+// The two alphabets are alternatives, not a union: a payload is read under
+// EXACTLY ONE of them, chosen by the first character that tells them apart
+// ('+' or '/' for the standard alphabet, '-' or '_' for the URL one). Fitting
+// that choice is half the check — "AAA+BBB/" mixes both and is a base64
+// payload in none of the four spellings, so no decoder reads it. Accepting the
+// mix let a junk payload through the media gate as inline data, and the
+// upstream answered 400 INVALID_ARGUMENT on every replay of that turn.
 func ValidatePermissive(s string) (decodedLen int, ok bool) {
 	n := len(s)
 	if n == 0 {
@@ -165,8 +168,22 @@ func ValidatePermissive(s string) (decodedLen int, ok bool) {
 		}
 	}
 
+	// urlAlphabet is chosen by convention — the first member of the pair the
+	// payload carries. A payload carrying neither stays on the standard table,
+	// where the two agree byte for byte.
+	urlAlphabet := false
 	for i := 0; i < n; i++ {
-		if anyDecodeTable[s[i]] < 0 {
+		switch s[i] {
+		case '-', '_':
+			urlAlphabet = true
+		}
+	}
+	table := &stdDecodeTable
+	if urlAlphabet {
+		table = &urlDecodeTable
+	}
+	for i := 0; i < n; i++ {
+		if table[s[i]] < 0 {
 			return 0, false
 		}
 	}
