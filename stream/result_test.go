@@ -46,3 +46,14 @@ func TestObserverUsesSharedFactsForInBandFailure(t *testing.T) {
 		t.Fatalf("observer result = %+v, want terminal failure", observer.Result)
 	}
 }
+
+func BenchmarkEventEncode(b *testing.B) {
+	ev := Event{
+		Event: "content_block_delta",
+		Data:  `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello world"}}`,
+	}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = ev.Encode()
+	}
+}
