@@ -59,16 +59,36 @@ func (e Event) Dialect() Dialect {
 
 func (e Event) Encode() string {
 	var b strings.Builder
+	// Performance optimization: Pre-grow builder to avoid reallocations.
+	// Size: "event: " (7) + e.Event + "\n" (1) + "data: " (6) + e.Data + "\n\n" (2).
+	extraCap := 2
+	if e.Event != "" {
+		extraCap += 8 + len(e.Event)
+	}
+	if e.Data != "" {
+		extraCap += 7 + len(e.Data)
+	}
+	b.Grow(extraCap)
+
 	if e.Event != "" {
 		b.WriteString("event: ")
 		b.WriteString(e.Event)
 		b.WriteByte('\n')
 	}
 	if e.Data != "" {
-		for _, line := range strings.Split(e.Data, "\n") {
+		// Zero-alloc line scanning avoids strings.Split slice allocations.
+		rem := e.Data
+		for {
+			idx := strings.IndexByte(rem, '\n')
 			b.WriteString("data: ")
-			b.WriteString(line)
+			if idx < 0 {
+				b.WriteString(rem)
+				b.WriteByte('\n')
+				break
+			}
+			b.WriteString(rem[:idx])
 			b.WriteByte('\n')
+			rem = rem[idx+1:]
 		}
 	}
 	b.WriteByte('\n')
