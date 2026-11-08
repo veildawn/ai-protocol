@@ -1444,3 +1444,29 @@ func TestFilesNamespaceURIIsUniformAcrossFolds(t *testing.T) {
 		})
 	}
 }
+
+func TestObserveReaderMaxTailBytes(t *testing.T) {
+	// A stream with an unterminated chunk exceeding maxObserverTailBytes must fail
+	// with an error instead of accumulating unbounded memory.
+	oversized := strings.Repeat(": comment\n", (maxObserverTailBytes/(len(": comment\n")))+1)
+	var dst bytes.Buffer
+
+	// Test cross-dialect conversion
+	_, err := PipeStreamWith(Responses, Chat, &dst, strings.NewReader(oversized), StreamOpts{})
+	if err == nil {
+		t.Fatal("expected error for oversized unterminated stream in cross-dialect conversion, got nil")
+	}
+	if !strings.Contains(err.Error(), "stream event exceeds") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+
+	// Test same-dialect conversion
+	dst.Reset()
+	_, err = PipeStreamWith(Chat, Chat, &dst, strings.NewReader(oversized), StreamOpts{})
+	if err == nil {
+		t.Fatal("expected error for oversized unterminated stream in same-dialect conversion, got nil")
+	}
+	if !strings.Contains(err.Error(), "stream event exceeds") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+}
