@@ -82,6 +82,15 @@ func (f *Framer) Feed(p []byte, fn func(Event) error) error {
 // takeLine appends content to the pending line and processes the result as one
 // complete line.
 func (f *Framer) takeLine(content []byte, fn func(Event) error) error {
+	// Fast path: when no previous chunk left an unterminated line, process
+	// the complete line slice directly without copying or allocating f.line.
+	if len(f.line) == 0 {
+		if len(content) > maxEventBytes {
+			return fmt.Errorf("SSE line exceeds %d bytes", maxEventBytes)
+		}
+		return f.processLine(content, fn)
+	}
+
 	if len(f.line)+len(content) > maxEventBytes {
 		return fmt.Errorf("SSE line exceeds %d bytes", maxEventBytes)
 	}
@@ -114,7 +123,12 @@ func (f *Framer) processLine(line []byte, fn func(Event) error) error {
 	if line[0] == ':' {
 		return nil
 	}
-	name, value, _ := bytes.Cut(line, []byte{':'})
+	var name, value []byte
+	if colon := bytes.IndexByte(line, ':'); colon >= 0 {
+		name, value = line[:colon], line[colon+1:]
+	} else {
+		name = line
+	}
 	if len(value) > 0 && value[0] == ' ' {
 		value = value[1:]
 	}
