@@ -307,6 +307,11 @@ func PipeStreamWith(from, to Dialect, dst io.Writer, source io.Reader, opts Stre
 	return result, err
 }
 
+// maxObserverTailBytes bounds the un-delimited bytes observeReader will buffer.
+// An unterminated event cannot grow past this ceiling without triggering an
+// error, preventing unbounded memory accumulation (DoS).
+const maxObserverTailBytes = 8 << 20
+
 // observeReader feeds the observer the same bytes the pipe reads, parsed as a
 // STREAM rather than one read at a time.
 //
@@ -357,6 +362,9 @@ func (o *observeReader) Read(p []byte) (int, error) {
 // feed appends one read's bytes and hands every event that has arrived whole to
 // the observer, keeping the unfinished tail for the next read.
 func (o *observeReader) feed(chunk []byte) error {
+	if len(o.tail)+len(chunk) > maxObserverTailBytes {
+		return fmt.Errorf("stream event exceeds %d bytes", maxObserverTailBytes)
+	}
 	o.tail = append(o.tail, chunk...)
 	end := lastEventEnd(o.tail)
 	if end < 0 {
