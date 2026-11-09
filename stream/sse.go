@@ -59,16 +59,36 @@ func (e Event) Dialect() Dialect {
 
 func (e Event) Encode() string {
 	var b strings.Builder
+	// Optimization: Pre-grow builder buffer to eliminate dynamic reallocations,
+	// and slice e.Data line by line with IndexByte instead of strings.Split to
+	// avoid slice-of-strings heap allocation.
+	extra := 1
+	if e.Event != "" {
+		extra += len("event: ") + len(e.Event) + 1
+	}
+	if e.Data != "" {
+		extra += len("data: ") + len(e.Data) + 1
+	}
+	b.Grow(extra)
+
 	if e.Event != "" {
 		b.WriteString("event: ")
 		b.WriteString(e.Event)
 		b.WriteByte('\n')
 	}
 	if e.Data != "" {
-		for _, line := range strings.Split(e.Data, "\n") {
+		rem := e.Data
+		for {
+			idx := strings.IndexByte(rem, '\n')
 			b.WriteString("data: ")
-			b.WriteString(line)
+			if idx < 0 {
+				b.WriteString(rem)
+				b.WriteByte('\n')
+				break
+			}
+			b.WriteString(rem[:idx])
 			b.WriteByte('\n')
+			rem = rem[idx+1:]
 		}
 	}
 	b.WriteByte('\n')
