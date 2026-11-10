@@ -155,6 +155,81 @@ func TestMessagesToResponsesUsageFoldsCacheTokens(t *testing.T) {
 	}
 }
 
+// Some sources only learn the prompt size after the turn has run (an agent
+// bridge totalling a multi-step turn) and send message_start with zero input,
+// then the real counts on message_delta. Anthropic's message_delta usage is
+// cumulative, so a field it names supersedes message_start's and a field it
+// omits keeps message_start's. The streaming fold used to read only
+// output_tokens off message_delta, reporting such a turn's input as 0 while
+// chatmessages and geminimessages already merged the whole usage.
+func TestMessagesToResponsesStreamTakesInputUsageFromMessageDelta(t *testing.T) {
+	run := func(startUsage, deltaUsage string) map[string]any {
+		t.Helper()
+		src := strings.Join([]string{
+			`event: message_start`,
+			`data: {"type":"message_start","message":{"id":"msg_1","model":"m","usage":` + startUsage + `}}`,
+			``,
+			`event: content_block_start`,
+			`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+			``,
+			`event: content_block_delta`,
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}`,
+			``,
+			`event: content_block_stop`,
+			`data: {"type":"content_block_stop","index":0}`,
+			``,
+			`event: message_delta`,
+			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":` + deltaUsage + `}`,
+			``,
+			`event: message_stop`,
+			`data: {"type":"message_stop"}`,
+			``,
+		}, "\n")
+		var dst bytes.Buffer
+		if _, err := PipeStream(Messages, Responses, &dst, strings.NewReader(src), StreamOpts{}); err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range respEvents(t, dst.String()) {
+			if e["type"] == "response.completed" {
+				resp, _ := e["response"].(map[string]any)
+				usage, ok := resp["usage"].(map[string]any)
+				if !ok {
+					t.Fatalf("usage = %#v", resp["usage"])
+				}
+				return usage
+			}
+		}
+		t.Fatalf("no response.completed:\n%s", dst.String())
+		return nil
+	}
+	check := func(label string, usage map[string]any, in, out, cached, text, write int) {
+		t.Helper()
+		details, ok := usage["input_tokens_details"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s: input_tokens_details = %#v", label, usage["input_tokens_details"])
+		}
+		got := fmt.Sprintf("in=%d out=%d total=%d cached=%d text=%d write=%d",
+			respNum(t, usage["input_tokens"]), respNum(t, usage["output_tokens"]), respNum(t, usage["total_tokens"]),
+			respNum(t, details["cached_tokens"]), respNum(t, details["text_tokens"]), respNum(t, details["cache_write_tokens"]))
+		want := fmt.Sprintf("in=%d out=%d total=%d cached=%d text=%d write=%d", in, out, in+out, cached, text, write)
+		if got != want {
+			t.Fatalf("%s: got %s, want %s", label, got, want)
+		}
+	}
+
+	// Zero at the start, everything on the delta.
+	check("deferred", run(
+		`{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}`,
+		`{"input_tokens":417,"output_tokens":7,"cache_read_input_tokens":300,"cache_creation_input_tokens":20}`),
+		737, 7, 300, 417, 20)
+
+	// The delta names input only: the cache counts message_start gave stand.
+	check("partial", run(
+		`{"input_tokens":5,"cache_read_input_tokens":50,"cache_creation_input_tokens":10}`,
+		`{"input_tokens":120,"output_tokens":9}`),
+		180, 9, 50, 120, 10)
+}
+
 // LiteLLM merges every thinking and redacted_thinking block of the turn into
 // ONE reasoning item: the concatenated thinking text rides an output_text part
 // in content (not summary), and the blocks carrying opaque bytes are re-encoded
