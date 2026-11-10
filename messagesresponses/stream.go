@@ -391,13 +391,7 @@ func (s *msgToResp) feed(event string, obj map[string]any) []stream.Event {
 				s.model = m
 			}
 			if u, ok := jsonx.AsMap(msg["usage"]); ok {
-				in, _ := jsonx.Int(u["input_tokens"])
-				cr, _ := jsonx.Int(u["cache_read_input_tokens"])
-				cw, _ := jsonx.Int(u["cache_creation_input_tokens"])
-				s.inTok = in + cr + cw
-				s.inRawTok = in
-				s.cachedTok = cr
-				s.cacheWriteTk = cw
+				s.applyInputUsage(u)
 			}
 		}
 		evs = append(evs, s.openShells()...)
@@ -497,10 +491,17 @@ func (s *msgToResp) feed(event string, obj map[string]any) []stream.Event {
 		// Anthropic reports the running output count here, not on
 		// message_stop — reading usage off the terminal frame is what used
 		// to zero out billing on this fold.
+		// A source that only learns its prompt size once the turn has run
+		// (an agent bridge totalling a multi-step turn, say) reports input and
+		// cache counts here too; the frame's usage is cumulative, so any
+		// field it names supersedes message_start's. chatmessages and
+		// geminimessages already merge it whole — dropping it here was what
+		// zeroed input on this fold alone.
 		if u, ok := jsonx.AsMap(obj["usage"]); ok {
 			if out, ok := jsonx.Int(u["output_tokens"]); ok {
 				s.outTok = out
 			}
+			s.applyInputUsage(u)
 		}
 	case "message_stop":
 		evs = append(evs, s.maybeReasoningDone()...)
@@ -513,6 +514,23 @@ func (s *msgToResp) feed(event string, obj map[string]any) []stream.Event {
 		s.closed = true
 	}
 	return evs
+}
+
+// applyInputUsage takes the input-side counts an Anthropic usage object
+// names, leaving the ones it omits as they were. Input counts here the way the
+// reference's calculate_usage does: uncached prompt plus cache reads and
+// writes.
+func (s *msgToResp) applyInputUsage(u map[string]any) {
+	if in, ok := jsonx.Int(u["input_tokens"]); ok {
+		s.inRawTok = in
+	}
+	if cr, ok := jsonx.Int(u["cache_read_input_tokens"]); ok {
+		s.cachedTok = cr
+	}
+	if cw, ok := jsonx.Int(u["cache_creation_input_tokens"]); ok {
+		s.cacheWriteTk = cw
+	}
+	s.inTok = s.inRawTok + s.cachedTok + s.cacheWriteTk
 }
 
 func (s *msgToResp) complete() []stream.Event {

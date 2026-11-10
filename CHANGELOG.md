@@ -8,6 +8,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Messages→Responses stream: input and cache counts carried on
+  `message_delta` are no longer dropped. The fold read only `output_tokens`
+  there, so a source that learns its prompt size once the turn has run (an
+  agent bridge totalling a multi-step turn) and sends `message_start` with
+  zero input closed with `response.completed` reporting input 0. Any usage
+  field `message_delta` names now supersedes `message_start`'s and omitted
+  fields keep theirs — the merge the Chat and Gemini folds already did.
 - Chat/Messages fold: tool ids that collide after the Messages character-class
   rewrite are separated instead of merged. `call.1` and `call_1` both sanitize
   to `call_1`; the fold wrote one id for two calls, and a dedupe that kept ids
